@@ -134,7 +134,7 @@ else:
                     html.Strong("Feature guide: "),
                     html.Ul(
                         [
-                            html.Li("id: row identifier (index-like field)."),
+                            html.Li("id: row identifier (should not have profound affect on prediction)."),
                             html.Li("Date: week of observation (YYYY-MM-DD)."),
                             html.Li("Total Volume: total number of avocados sold."),
                             html.Li("4046: count sold for PLU 4046 (small Hass)."),
@@ -198,9 +198,15 @@ if not STARTUP_ERROR:
     )
     def update_visualization(mode):
         if mode == "trend":
+            trend_source = df.copy()
+            trend_source["Date"] = pd.to_datetime(trend_source["Date"], errors="coerce")
+            trend_source = trend_source.dropna(subset=["Date", TARGET, "type"])
+            if trend_source.empty:
+                return px.line(
+                    title="Monthly Average Price Trend by Type (no valid date rows found)"
+                )
             trend_df = (
-                df.dropna(subset=["Date", TARGET])
-                .groupby([pd.Grouper(key="Date", freq="M"), "type"], as_index=False)[TARGET]
+                trend_source.groupby([pd.Grouper(key="Date", freq="ME"), "type"], as_index=False)[TARGET]
                 .mean()
             )
             return px.line(
