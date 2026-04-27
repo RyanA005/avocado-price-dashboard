@@ -51,6 +51,59 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
     )
 
 
+def select_features_by_correlation(
+    X: pd.DataFrame,
+    y: pd.Series,
+    min_abs_corr: float = 0.05,
+    max_numeric_features: int = 8,
+) -> Tuple[list[str], pd.DataFrame]:
+    numeric_features = X.select_dtypes(include=[np.number]).columns.tolist()
+    categorical_features = [c for c in X.columns if c not in numeric_features]
+
+    correlations = []
+    y_numeric = pd.to_numeric(y, errors="coerce")
+    for col in numeric_features:
+        series = pd.to_numeric(X[col], errors="coerce")
+        pair = pd.concat([series, y_numeric], axis=1).dropna()
+        if pair.empty or pair.iloc[:, 0].nunique() < 2:
+            corr_value = np.nan
+        else:
+            corr_value = pair.iloc[:, 0].corr(pair.iloc[:, 1])
+        correlations.append(
+            {
+                "feature": col,
+                "correlation": corr_value,
+                "abs_correlation": abs(corr_value) if pd.notna(corr_value) else np.nan,
+            }
+        )
+
+    corr_df = pd.DataFrame(correlations)
+    if corr_df.empty:
+        selected_numeric = []
+    else:
+        ranked = corr_df.dropna(subset=["abs_correlation"]).sort_values(
+            by="abs_correlation", ascending=False
+        )
+        selected_numeric = ranked.loc[
+            ranked["abs_correlation"] >= min_abs_corr, "feature"
+        ].tolist()
+        if not selected_numeric:
+            selected_numeric = ranked.head(max_numeric_features)["feature"].tolist()
+        elif len(selected_numeric) > max_numeric_features:
+            selected_numeric = selected_numeric[:max_numeric_features]
+
+    if not selected_numeric and numeric_features:
+        selected_numeric = numeric_features[: min(max_numeric_features, len(numeric_features))]
+
+    selected_features = selected_numeric + categorical_features
+    if corr_df.empty:
+        corr_df = pd.DataFrame(columns=["feature", "correlation", "abs_correlation"])
+    else:
+        corr_df = corr_df.sort_values(by="abs_correlation", ascending=False)
+
+    return selected_features, corr_df
+
+
 def get_models(task_type: str) -> Dict[str, object]:
     if task_type == "regression":
         return {

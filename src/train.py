@@ -13,6 +13,7 @@ from ml_core import (
     evaluate_pipeline,
     get_models,
     infer_task_type,
+    select_features_by_correlation,
     tune_model,
     write_metrics_json,
 )
@@ -49,6 +50,15 @@ def main():
         X, y, test_size=0.2, random_state=42
     )
 
+    feature_selection_report = pd.DataFrame()
+    selected_features = list(X_train.columns)
+    if task_type == "regression":
+        selected_features, feature_selection_report = select_features_by_correlation(
+            X_train, y_train
+        )
+        X_train = X_train[selected_features]
+        X_test = X_test[selected_features]
+
     preprocessor = build_preprocessor(X_train)
     models = get_models(task_type)
 
@@ -62,7 +72,7 @@ def main():
         )
         if args.full_eval:
             trained_pipeline = tune_model(pipeline, model_name, task_type, X_train, y_train)
-            cv = cross_validation_score(trained_pipeline, X, y, task_type)
+            cv = cross_validation_score(trained_pipeline, X_train, y_train, task_type)
         else:
             trained_pipeline = pipeline
             cv = float("nan")
@@ -93,6 +103,12 @@ def main():
     report_path = os.path.join(args.artifacts_dir, "model_report.csv")
     report_df.to_csv(report_path, index=False)
 
+    if not feature_selection_report.empty:
+        corr_path = os.path.join(args.artifacts_dir, "feature_correlation_report.csv")
+        feature_selection_report.to_csv(corr_path, index=False)
+    else:
+        corr_path = ""
+
     model_path = os.path.join(args.artifacts_dir, "best_model.joblib")
     joblib.dump(best_pipeline, model_path)
 
@@ -100,6 +116,8 @@ def main():
         "task_type": task_type,
         "target": args.target,
         "best_model": report_df.iloc[0]["model"],
+        "selected_features": selected_features,
+        "feature_selection_report_path": corr_path,
         "report_path": report_path,
         "model_path": model_path,
     }
