@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 from dash import Dash, Input, Output, State, dcc, html
-from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.pipeline import Pipeline
 
 from src.ml_core import build_preprocessor, clean_dataframe
@@ -12,6 +12,7 @@ from src.ml_core import build_preprocessor, clean_dataframe
 DATA_PATH = "data/avocado.csv"
 TARGET = "AveragePrice"
 MODEL_PATH = "artifacts/best_model.joblib"
+EXCLUDED_FEATURES = {"id"}
 
 STARTUP_ERROR = ""
 MODEL_ERROR = ""
@@ -28,7 +29,7 @@ try:
     df = pd.read_csv(DATA_PATH)
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     clean_df = clean_dataframe(df)
-    feature_cols = [c for c in clean_df.columns if c != TARGET]
+    feature_cols = [c for c in clean_df.columns if c != TARGET and c not in EXCLUDED_FEATURES]
     if "Date" in feature_cols:
         # Keep deployment robust by avoiding datetime handling differences.
         feature_cols.remove("Date")
@@ -44,35 +45,60 @@ except Exception as exc:
 
 
 def get_model() -> object | None:
-    global MODEL, MODEL_ERROR
+    global MODEL, MODEL_ERROR, model_feature_cols
     if MODEL is not None:
         return MODEL
     if STARTUP_ERROR:
         return None
+    load_issue = ""
     try:
-        MODEL = joblib.load(MODEL_PATH)
+        loaded_model = joblib.load(MODEL_PATH)
+        loaded_features = list(getattr(loaded_model, "feature_names_in_", []))
+        disallowed = {"Date", *EXCLUDED_FEATURES}
+        if loaded_features and any(col in disallowed for col in loaded_features):
+            raise ValueError(
+                "Saved model uses excluded/raw features (id/Date). Retrain model with current feature rules."
+            )
+        if loaded_features and any(col not in feature_cols for col in loaded_features):
+            raise ValueError(
+                "Saved model expects features not available in app runtime."
+            )
+        if loaded_features:
+            model_feature_cols = loaded_features
+        MODEL = loaded_model
         return MODEL
     except FileNotFoundError:
-        try:
-            sample_df = clean_df.dropna(subset=[TARGET])
-            if len(sample_df) > 6000:
-                sample_df = sample_df.sample(n=6000, random_state=42)
-            X = sample_df[feature_cols]
-            y = sample_df[TARGET]
-            fallback = Pipeline(
-                steps=[
-                    ("preprocess", build_preprocessor(X)),
-                    ("model", LinearRegression()),
-                ]
-            )
-            fallback.fit(X, y)
-            MODEL = fallback
-            return MODEL
-        except Exception as exc:
-            MODEL_ERROR = f"Fallback model training failed: {exc}"
-            return None
+        load_issue = "Model artifact not found."
     except Exception as exc:
-        MODEL_ERROR = f"Model loading failed: {exc}"
+        load_issue = f"Model loading failed: {exc}"
+
+    try:
+        sample_df = clean_df.dropna(subset=[TARGET])
+        if len(sample_df) > 6000:
+            sample_df = sample_df.sample(n=6000, random_state=42)
+        X = sample_df[feature_cols]
+        y = sample_df[TARGET]
+        fallback = Pipeline(
+            steps=[
+                ("preprocess", build_preprocessor(X)),
+                (
+                    "model",
+                    RandomForestRegressor(
+                        n_estimators=160,
+                        max_depth=16,
+                        min_samples_leaf=2,
+                        random_state=42,
+                        n_jobs=1,
+                    ),
+                ),
+            ]
+        )
+        fallback.fit(X, y)
+        MODEL = fallback
+        model_feature_cols = list(feature_cols)
+        return MODEL
+    except Exception as exc:
+        MODEL_ERROR = f"{load_issue} Fallback model training failed: {exc}".strip()
         return None
 
 
@@ -134,7 +160,6 @@ else:
                     html.Strong("Feature guide: "),
                     html.Ul(
                         [
-                            html.Li("id: row identifier (should not have profound affect on prediction)."),
                             html.Li("Date: week of observation (YYYY-MM-DD)."),
                             html.Li("Total Volume: total number of avocados sold."),
                             html.Li("4046: count sold for PLU 4046 (small Hass)."),

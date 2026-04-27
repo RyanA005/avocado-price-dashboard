@@ -19,6 +19,7 @@ from ml_core import (
 
 
 def main():
+    excluded_features = {"id"}
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default="data/avocado.csv")
     parser.add_argument("--target", type=str, default="AveragePrice")
@@ -39,7 +40,8 @@ def main():
     if args.sample_size and len(df) > args.sample_size:
         df = df.sample(n=args.sample_size, random_state=42)
 
-    X = df.drop(columns=[args.target])
+    drop_cols = [args.target] + [c for c in excluded_features if c in df.columns]
+    X = df.drop(columns=drop_cols)
     y = df[args.target]
     task_type = infer_task_type(y)
 
