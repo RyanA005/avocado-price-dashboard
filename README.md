@@ -48,6 +48,29 @@ App features required by the assignment:
 - Simple feature-level or whole-dataset visualization
 - Manual numeric input prediction for `AveragePrice`
 
-## Suggested Deployment
+## 5) Deploy to Vercel
 
-Deploy to AWS, GCP, or Heroku as required by your class.
+This project is configured for Vercel serverless Python deployment.
+
+### Required tracked files
+
+Vercel builds from your repository, so these files must be committed:
+- `data/avocado.csv`
+
+`artifacts/best_model.joblib` is optional. If missing, the app trains a lightweight fallback Linear Regression model at startup.
+
+### Project files used for deployment
+
+- `vercel.json`: routes all traffic to the Python runtime
+- `api/index.py`: exposes the WSGI app entrypoint
+- `dash_app.py`: exports `server` for deployment
+
+### Deploy steps
+
+1. Push your repo to GitHub/GitLab/Bitbucket.
+2. Import the repo in Vercel.
+3. Framework preset: keep as **Other**.
+4. Root directory: repository root (default).
+5. Deploy.
+
+After deployment, Vercel will serve the Dash app from the project URL.

@@ -3,6 +3,10 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 from dash import Dash, Input, Output, State, dcc, html
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import Pipeline
+
+from src.ml_core import build_preprocessor, clean_dataframe
 
 
 DATA_PATH = "data/avocado.csv"
@@ -11,8 +15,30 @@ MODEL_PATH = "artifacts/best_model.joblib"
 
 df = pd.read_csv(DATA_PATH)
 df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-feature_cols = [c for c in df.columns if c != TARGET]
-MODEL = joblib.load(MODEL_PATH)
+clean_df = clean_dataframe(df)
+feature_cols = [c for c in clean_df.columns if c != TARGET]
+if "Date" in feature_cols:
+    # Keep deployment robust by avoiding datetime handling differences.
+    feature_cols.remove("Date")
+
+
+def load_or_train_model() -> object:
+    try:
+        return joblib.load(MODEL_PATH)
+    except FileNotFoundError:
+        X = clean_df[feature_cols]
+        y = clean_df[TARGET]
+        fallback = Pipeline(
+            steps=[
+                ("preprocess", build_preprocessor(X)),
+                ("model", LinearRegression()),
+            ]
+        )
+        fallback.fit(X, y)
+        return fallback
+
+
+MODEL = load_or_train_model()
 model_feature_cols = list(getattr(MODEL, "feature_names_in_", feature_cols))
 input_feature_cols = [c for c in model_feature_cols if c in df.columns]
 numeric_feature_cols = [c for c in input_feature_cols if pd.api.types.is_numeric_dtype(df[c])]
@@ -42,6 +68,7 @@ def category_options(col: str) -> list[dict]:
 
 app = Dash(__name__)
 app.title = "Avocado Price Dashboard"
+server = app.server
 
 app.layout = html.Div(
     [
@@ -211,4 +238,4 @@ def predict_price(n_clicks, *values):
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=False)

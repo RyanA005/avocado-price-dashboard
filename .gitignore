@@ -1,2 +1,3 @@
-**/artifacts/** 
-**/data/** 
+**/artifacts/**
+**/data/**
+__pycache__/
