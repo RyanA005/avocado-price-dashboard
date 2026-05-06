@@ -41,6 +41,9 @@ TRAINING_VERSION = 0
 MODEL_METRICS_STATE = {"options": [], "value": None, "cards": [], "message": ""}
 MODEL_METRICS_CACHE: dict[tuple[str, int, str | None, tuple[str, ...]], tuple] = {}
 UPLOAD_MESSAGE = "Upload a CSV file to replace the current dataset."
+DEFAULT_PREDICTION_PLACEHOLDER = (
+    "Select features first, then enter values in the same order separated by commas."
+)
 TRAIN_BUTTON_IDLE = "Train Model"
 TRAIN_BUTTON_RUNNING = [
     html.Span(
@@ -299,7 +302,7 @@ def build_correlation_figure(frame: pd.DataFrame, target: str):
 
 def build_prediction_placeholder(selected_features: list[str]) -> str:
     if not selected_features:
-        return "Select features first, then enter values in the same order separated by commas."
+        return DEFAULT_PREDICTION_PLACEHOLDER
     return "Enter values in this order: " + ", ".join(selected_features)
 
 
@@ -447,6 +450,12 @@ def set_model_metrics_state(
     return MODEL_METRICS_STATE
 
 
+def render_model_metrics_state(state: dict | None):
+    if not state:
+        return [], None, []
+    return state.get("options", []), state.get("value"), state.get("cards", [])
+
+
 def parse_prediction_values(
     raw_value: str | None, selected_features: list[str], frame: pd.DataFrame
 ):
@@ -539,6 +548,7 @@ app.layout = html.Div(
     [
         dcc.Store(id="dataset-store", data=dataframe_to_store(CURRENT_DF)),
         dcc.Store(id="training-version", data=TRAINING_VERSION),
+        dcc.Store(id="model-metrics-store", data=MODEL_METRICS_STATE),
         html.Div(
             [
                 html.H1(
@@ -831,7 +841,13 @@ app.layout = html.Div(
                             build_prediction_placeholder(
                                 feature_columns(CURRENT_DF, CURRENT_TARGET)
                             ),
-                            style={"marginTop": "4px"},
+                            style={
+                                "marginTop": "4px",
+                                "whiteSpace": "normal",
+                                "overflowWrap": "anywhere",
+                                "wordBreak": "break-word",
+                                "lineHeight": "1.35",
+                            },
                             id="prediction-order",
                         ),
                     ],
@@ -842,14 +858,18 @@ app.layout = html.Div(
                         dcc.Input(
                             id="prediction-input",
                             type="text",
-                            placeholder=build_prediction_placeholder(
-                                feature_columns(CURRENT_DF, CURRENT_TARGET)
-                            ),
+                            placeholder=DEFAULT_PREDICTION_PLACEHOLDER,
                             style={
-                                "flex": "1",
-                                "padding": "20px 22px",
+                                "flex": "1 1 auto",
+                                "minWidth": "0",
+                                "width": "100%",
+                                "height": "48px",
+                                "padding": "12px 14px",
                                 "borderRadius": "10px",
                                 "border": "1px solid #cbd5e1",
+                                "boxSizing": "border-box",
+                                "fontSize": "1rem",
+                                "lineHeight": "1.2",
                             },
                         ),
                         html.Button(
@@ -899,6 +919,7 @@ app.layout = html.Div(
 @app.callback(
     Output("dataset-store", "data"),
     Output("upload-status", "children"),
+    Output("model-metrics-store", "data"),
     Input("dataset-upload", "contents"),
     State("dataset-upload", "filename"),
     State("dataset-store", "data"),
@@ -906,17 +927,30 @@ app.layout = html.Div(
 )
 def handle_dataset_upload(contents, filename, current_store):
     if not contents:
-        return current_store, UPLOAD_MESSAGE
+        return current_store, UPLOAD_MESSAGE, MODEL_METRICS_STATE
     try:
         uploaded_frame = parse_uploaded_file(contents, filename)
         dataset_name = filename or "Uploaded dataset"
         set_current_dataframe(uploaded_frame, dataset_name)
+        initial_target = (
+            numeric_columns(CURRENT_DF)[0] if numeric_columns(CURRENT_DF) else None
+        )
+        initial_features = feature_columns(CURRENT_DF, initial_target)
+        metrics_state = set_model_metrics_state(
+            dataset_name,
+            0,
+            CURRENT_DF,
+            initial_target,
+            initial_features,
+            None,
+        )
         return (
             dataframe_to_store(CURRENT_DF),
             f"Loaded {CURRENT_DATASET_NAME}. Rows: {len(CURRENT_DF):,}, columns: {len(CURRENT_DF.columns):,}.",
+            metrics_state,
         )
     except Exception as exc:
-        return current_store, f"Upload failed: {exc}"
+        return current_store, f"Upload failed: {exc}", MODEL_METRICS_STATE
 
 
 @app.callback(
@@ -988,37 +1022,19 @@ def refresh_view(dataset_data, target_value, category_value, selected_features):
 
 @app.callback(
     Output("model-dropdown", "options"),
-    Output("model-dropdown", "value", allow_duplicate=True),
+    Output("model-dropdown", "value"),
     Output("model-metrics", "children"),
-    Input("dataset-store", "data"),
-    Input("training-version", "data"),
-    Input("target-dropdown", "value"),
-    Input("feature-checklist", "value"),
-    State("model-dropdown", "value"),
-    prevent_initial_call=True,
+    Input("model-metrics-store", "data"),
 )
-def update_model_metrics(
-    dataset_data, training_version, target_value, selected_features, selected_model
-):
-    frame = dataframe_from_store(dataset_data)
-    if frame.empty and not CURRENT_DF.empty:
-        frame = CURRENT_DF
-
-    state = set_model_metrics_state(
-        dataset_data,
-        training_version or 0,
-        frame,
-        target_value,
-        selected_features or [],
-        selected_model,
-    )
-    return state["options"], state["value"], state["cards"]
+def update_model_metrics(state):
+    options, value, cards = render_model_metrics_state(state)
+    return options, value, cards
 
 
 @app.callback(
     Output("train-output", "children"),
-    Output("model-dropdown", "value"),
     Output("training-version", "data"),
+    Output("model-metrics-store", "data"),
     Input("train-btn", "n_clicks"),
     State("target-dropdown", "value"),
     State("feature-checklist", "value"),
@@ -1072,15 +1088,15 @@ def train_model(n_clicks, target_value, selected_features):
         if CURRENT_DF.empty:
             LAST_TRAIN_MESSAGE = "Upload a dataset before training."
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-            return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
+            return LAST_TRAIN_MESSAGE, TRAINING_VERSION, MODEL_METRICS_STATE
         if not target_value or target_value not in CURRENT_DF.columns:
             LAST_TRAIN_MESSAGE = "Choose a valid numerical target before training."
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-            return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
+            return LAST_TRAIN_MESSAGE, TRAINING_VERSION, MODEL_METRICS_STATE
         if not selected_features:
             LAST_TRAIN_MESSAGE = "Select at least one feature before training."
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-            return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
+            return LAST_TRAIN_MESSAGE, TRAINING_VERSION, MODEL_METRICS_STATE
 
         cleaned_features = [
             feature
@@ -1093,7 +1109,7 @@ def train_model(n_clicks, target_value, selected_features):
                 "Selected features do not contain any usable predictors."
             )
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-            return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
+            return LAST_TRAIN_MESSAGE, TRAINING_VERSION, MODEL_METRICS_STATE
 
         X = CURRENT_DF[cleaned_features].copy()
         y = CURRENT_DF[target_value].copy()
@@ -1107,12 +1123,12 @@ def train_model(n_clicks, target_value, selected_features):
         if task_type != "regression":
             LAST_TRAIN_MESSAGE = "The selected target is not numerical. Choose a numerical target for regression."
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-            return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
+            return LAST_TRAIN_MESSAGE, TRAINING_VERSION, MODEL_METRICS_STATE
 
         if len(CURRENT_DF) < 10:
             LAST_TRAIN_MESSAGE = "Dataset is too small to train a stable model."
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-            return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
+            return LAST_TRAIN_MESSAGE, TRAINING_VERSION, MODEL_METRICS_STATE
 
         X_train, X_test, y_train, y_test = train_test_split(
             X,
@@ -1149,7 +1165,7 @@ def train_model(n_clicks, target_value, selected_features):
         if not trained_models:
             LAST_TRAIN_MESSAGE = "Training failed to produce a valid model."
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-            return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
+            return LAST_TRAIN_MESSAGE, TRAINING_VERSION, MODEL_METRICS_STATE
 
         logger.info(
             "Train stage: storing trained models=%s", list(trained_models.keys())
@@ -1162,7 +1178,7 @@ def train_model(n_clicks, target_value, selected_features):
         TRAINED_TASK_TYPE = task_type
         LAST_PREDICTION_MESSAGE = ""
         TRAINING_VERSION += 1
-        set_model_metrics_state(
+        metrics_state = set_model_metrics_state(
             CURRENT_DATASET_NAME,
             TRAINING_VERSION,
             CURRENT_DF,
@@ -1172,11 +1188,11 @@ def train_model(n_clicks, target_value, selected_features):
         )
         LAST_TRAIN_MESSAGE = f"Trained {len(trained_models)} models. Selected {best_model_name}. R^2: {best_score:.4f}"
         logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-        return LAST_TRAIN_MESSAGE, best_model_name, TRAINING_VERSION
+        return LAST_TRAIN_MESSAGE, TRAINING_VERSION, metrics_state
     except Exception as exc:
         LAST_TRAIN_MESSAGE = f"Training failed: {exc}"
         logger.exception("Training failed at train callback")
-        return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
+        return LAST_TRAIN_MESSAGE, TRAINING_VERSION, MODEL_METRICS_STATE
 
 
 @app.callback(
