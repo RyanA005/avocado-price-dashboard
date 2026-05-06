@@ -1,318 +1,761 @@
-import joblib
-import numpy as np
+from __future__ import annotations
+
+import base64
+import io
+import logging
+from typing import Iterable
+
 import pandas as pd
 import plotly.express as px
-from dash import Dash, Input, Output, State, dcc, html
-from sklearn.ensemble import RandomForestRegressor
+from dash import Dash, Input, Output, State, ctx, dcc, html
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
-from src.ml_core import build_preprocessor, clean_dataframe
+from src.ml_core import (
+    build_preprocessor,
+    clean_dataframe,
+    evaluate_pipeline,
+    get_models,
+    infer_task_type,
+)
 
 
-DATA_PATH = "data/avocado.csv"
-TARGET = "AveragePrice"
-MODEL_PATH = "artifacts/best_model.joblib"
-EXCLUDED_FEATURES = {"id"}
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-STARTUP_ERROR = ""
-MODEL_ERROR = ""
-MODEL = None
-df = pd.DataFrame()
-clean_df = pd.DataFrame()
-feature_cols = []
-model_feature_cols = []
-input_feature_cols = []
-numeric_feature_cols = []
-categorical_feature_cols = []
 
-try:
-    df = pd.read_csv(DATA_PATH)
-    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    clean_df = clean_dataframe(df)
-    feature_cols = [c for c in clean_df.columns if c != TARGET and c not in EXCLUDED_FEATURES]
-    if "Date" in feature_cols:
-        # Keep deployment robust by avoiding datetime handling differences.
-        feature_cols.remove("Date")
-    model_feature_cols = list(feature_cols)
-    input_feature_cols = [c for c in model_feature_cols if c in df.columns]
-    numeric_feature_cols = [c for c in input_feature_cols if pd.api.types.is_numeric_dtype(df[c])]
-    categorical_feature_cols = [c for c in input_feature_cols if not pd.api.types.is_numeric_dtype(df[c])]
-except Exception as exc:
-    STARTUP_ERROR = (
-        "Dataset initialization failed. Confirm data/avocado.csv is present "
-        f"and readable. Error: {exc}"
+DEFAULT_DATA_PATH = "data/avocado.csv"
+EXCLUDED_FEATURES = {"id", "Date"}
+
+CURRENT_DF = pd.DataFrame()
+CURRENT_DATASET_NAME = "No dataset loaded"
+CURRENT_TARGET = None
+TRAINED_MODEL = None
+TRAINED_FEATURES: list[str] = []
+TRAINED_TARGET = None
+TRAINED_TASK_TYPE = None
+LAST_TRAIN_MESSAGE = ""
+LAST_PREDICTION_MESSAGE = ""
+UPLOAD_MESSAGE = "Upload a CSV file to replace the current dataset."
+
+
+def load_dataframe(path: str) -> pd.DataFrame:
+    frame = pd.read_csv(path)
+    return clean_dataframe(frame)
+
+
+def set_current_dataframe(frame: pd.DataFrame, dataset_name: str) -> None:
+    global CURRENT_DF, CURRENT_DATASET_NAME, CURRENT_TARGET
+    global TRAINED_MODEL, TRAINED_FEATURES, TRAINED_TARGET, TRAINED_TASK_TYPE
+    global LAST_TRAIN_MESSAGE, LAST_PREDICTION_MESSAGE
+
+    CURRENT_DF = frame.copy()
+    CURRENT_DATASET_NAME = dataset_name
+    CURRENT_TARGET = None
+    TRAINED_MODEL = None
+    TRAINED_FEATURES = []
+    TRAINED_TARGET = None
+    TRAINED_TASK_TYPE = None
+    LAST_TRAIN_MESSAGE = ""
+    LAST_PREDICTION_MESSAGE = ""
+
+
+def load_initial_dataset() -> None:
+    try:
+        set_current_dataframe(load_dataframe(DEFAULT_DATA_PATH), "Bundled dataset")
+    except Exception:
+        set_current_dataframe(pd.DataFrame(), "No dataset loaded")
+
+
+def parse_uploaded_file(contents: str, filename: str | None) -> pd.DataFrame:
+    _, content_string = contents.split(",", 1)
+    decoded = base64.b64decode(content_string)
+    if filename and filename.lower().endswith(".csv"):
+        frame = pd.read_csv(io.StringIO(decoded.decode("utf-8")))
+    else:
+        frame = pd.read_csv(io.StringIO(decoded.decode("utf-8")))
+    return clean_dataframe(frame)
+
+
+def numeric_columns(frame: pd.DataFrame) -> list[str]:
+    return [
+        column
+        for column in frame.columns
+        if pd.api.types.is_numeric_dtype(frame[column]) and column not in EXCLUDED_FEATURES
+    ]
+
+
+def categorical_columns(frame: pd.DataFrame, target: str | None) -> list[str]:
+    return [
+        column
+        for column in frame.columns
+        if column != target
+        and column not in EXCLUDED_FEATURES
+        and not pd.api.types.is_numeric_dtype(frame[column])
+    ]
+
+
+def feature_columns(frame: pd.DataFrame, target: str | None) -> list[str]:
+    return [column for column in frame.columns if column != target and column not in EXCLUDED_FEATURES]
+
+
+def option_list(columns: Iterable[str]) -> list[dict]:
+    return [{"label": column, "value": column} for column in columns]
+
+
+def empty_figure(title: str, message: str) -> dict:
+    figure = px.bar(title=title)
+    figure.add_annotation(
+        text=message,
+        x=0.5,
+        y=0.5,
+        xref="paper",
+        yref="paper",
+        showarrow=False,
     )
+    figure.update_layout(template="plotly_white")
+    return figure
 
 
-def get_model() -> object | None:
-    global MODEL, MODEL_ERROR, model_feature_cols
-    if MODEL is not None:
-        return MODEL
-    if STARTUP_ERROR:
-        return None
-    load_issue = ""
-    try:
-        loaded_model = joblib.load(MODEL_PATH)
-        loaded_features = list(getattr(loaded_model, "feature_names_in_", []))
-        disallowed = {"Date", *EXCLUDED_FEATURES}
-        if loaded_features and any(col in disallowed for col in loaded_features):
-            raise ValueError(
-                "Saved model uses excluded/raw features (id/Date). Retrain model with current feature rules."
-            )
-        if loaded_features and any(col not in feature_cols for col in loaded_features):
-            raise ValueError(
-                "Saved model expects features not available in app runtime."
-            )
-        if loaded_features:
-            model_feature_cols = loaded_features
-        MODEL = loaded_model
-        return MODEL
-    except FileNotFoundError:
-        load_issue = "Model artifact not found."
-    except Exception as exc:
-        load_issue = f"Model loading failed: {exc}"
-
-    try:
-        sample_df = clean_df.dropna(subset=[TARGET])
-        if len(sample_df) > 6000:
-            sample_df = sample_df.sample(n=6000, random_state=42)
-        X = sample_df[feature_cols]
-        y = sample_df[TARGET]
-        fallback = Pipeline(
-            steps=[
-                ("preprocess", build_preprocessor(X)),
-                (
-                    "model",
-                    RandomForestRegressor(
-                        n_estimators=160,
-                        max_depth=16,
-                        min_samples_leaf=2,
-                        random_state=42,
-                        n_jobs=1,
-                    ),
-                ),
-            ]
+def build_target_figure(frame: pd.DataFrame, target: str, category: str | None):
+    if not target or target not in frame.columns:
+        return empty_figure("Average Target by Category", "Select a valid target column.")
+    if not category or category not in frame.columns:
+        return empty_figure(
+            "Average Target by Category",
+            "Select a categorical variable for the first chart.",
         )
-        fallback.fit(X, y)
-        MODEL = fallback
-        model_feature_cols = list(feature_cols)
-        return MODEL
-    except Exception as exc:
-        MODEL_ERROR = f"{load_issue} Fallback model training failed: {exc}".strip()
-        return None
 
-
-def numeric_default(col: str) -> float:
-    return float(df[col].dropna().median())
-
-
-def text_default(col: str) -> str:
-    series = df[col].dropna().astype(str)
-    return series.mode().iloc[0] if not series.empty else ""
-
-
-def category_options(col: str) -> list[dict]:
-    values = (
-        df[col]
+    chart_df = (
+        frame[[category, target]]
         .dropna()
-        .astype(str)
-        .sort_values()
-        .unique()
-        .tolist()
+        .groupby(category, as_index=False)[target]
+        .mean()
+        .sort_values(by=target, ascending=False)
     )
-    return [{"label": v, "value": v} for v in values]
+    if chart_df.empty:
+        return empty_figure("Average Target by Category", "No valid rows found for this chart.")
 
+    figure = px.bar(
+        chart_df,
+        x=category,
+        y=target,
+        title=f"Average {target} by {category}",
+    )
+    figure.update_layout(template="plotly_white", xaxis_title=category, yaxis_title=f"Average {target}")
+    return figure
+
+
+def build_correlation_figure(frame: pd.DataFrame, target: str):
+    if not target or target not in frame.columns:
+        return empty_figure("Absolute Correlation Strength", "Select a valid target column.")
+    if not pd.api.types.is_numeric_dtype(frame[target]):
+        return empty_figure(
+            "Absolute Correlation Strength",
+            "The selected target must be numerical.",
+        )
+
+    numeric_cols = [
+        column
+        for column in frame.columns
+        if pd.api.types.is_numeric_dtype(frame[column]) and column != target
+    ]
+    if not numeric_cols:
+        return empty_figure(
+            "Absolute Correlation Strength",
+            "No additional numerical columns are available.",
+        )
+
+    records = []
+    for column in numeric_cols:
+        pair = frame[[column, target]].dropna()
+        if len(pair) < 2 or pair[column].nunique() < 2:
+            continue
+        corr_value = pair[column].corr(pair[target])
+        if pd.notna(corr_value):
+            records.append(
+                {
+                    "feature": column,
+                    "abs_correlation": abs(float(corr_value)),
+                }
+            )
+
+    if not records:
+        return empty_figure(
+            "Absolute Correlation Strength",
+            "Correlation could not be computed for the selected target.",
+        )
+
+    corr_df = pd.DataFrame(records).sort_values(by="abs_correlation", ascending=False)
+    figure = px.bar(
+        corr_df,
+        x="feature",
+        y="abs_correlation",
+        title=f"Absolute Correlation With {target}",
+    )
+    figure.update_layout(
+        template="plotly_white",
+        xaxis_title="Feature",
+        yaxis_title="Absolute correlation",
+    )
+    return figure
+
+
+def build_prediction_placeholder(selected_features: list[str]) -> str:
+    if not selected_features:
+        return "Select features first, then enter values in the same order separated by commas."
+    return "Enter values in this order: " + ", ".join(selected_features)
+
+
+def build_model_metric_cards(
+    frame: pd.DataFrame,
+    target: str | None,
+    selected_features: list[str],
+) -> tuple[list[html.Div], list[dict], dict[str, dict[str, float]], str, str]:
+    if frame.empty or not target or target not in frame.columns or not selected_features:
+        return [], [], {}, "None", "Select features and a target to view model metrics."
+
+    cleaned_features = [feature for feature in selected_features if feature in frame.columns and feature != target]
+    if not cleaned_features:
+        return [], [], {}, "None", "Select at least one usable feature to view model metrics."
+
+    y = frame[target].copy()
+    task_type = infer_task_type(y)
+    X = frame[cleaned_features].copy()
+
+    if len(frame) < 10:
+        return [], [], {}, task_type, "Dataset is too small to estimate model metrics."
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X,
+        y,
+        test_size=0.2,
+        random_state=42,
+    )
+    preprocessor = build_preprocessor(X_train)
+    models = get_models(task_type)
+
+    cards = []
+    options = []
+    metrics_by_model: dict[str, dict[str, float]] = {}
+    for model_name, model in models.items():
+        pipeline = Pipeline([("preprocessor", preprocessor), ("model", model)])
+        metric_1, metric_2 = evaluate_pipeline(pipeline, X_train, X_test, y_train, y_test, task_type)
+        metrics_by_model[model_name] = {"metric_1": float(metric_1), "metric_2": float(metric_2)}
+        if task_type == "regression":
+            label = f"{model_name} - R^2: {metric_1:.4f}, RMSE: {metric_2:.4f}"
+            subtitle = f"R^2: {metric_1:.4f} | RMSE: {metric_2:.4f}"
+        else:
+            label = f"{model_name} - Accuracy: {metric_1:.4f}, F1: {metric_2:.4f}"
+            subtitle = f"Accuracy: {metric_1:.4f} | F1: {metric_2:.4f}"
+        cards.append(
+            html.Div(
+                [
+                    html.Div(model_name, style={"fontWeight": "700", "marginBottom": "4px"}),
+                    html.Div(subtitle, style={"color": "#475569", "fontSize": "0.94rem"}),
+                ],
+                style={
+                    "padding": "10px 12px",
+                    "border": "1px solid #dbe3ee",
+                    "borderRadius": "12px",
+                    "background": "#f8fafc",
+                    "marginBottom": "8px",
+                },
+            )
+        )
+        options.append({"label": label, "value": model_name})
+
+    return cards, options, metrics_by_model, task_type, ""
+
+
+def parse_prediction_values(raw_value: str | None, selected_features: list[str], frame: pd.DataFrame):
+    if not raw_value or not raw_value.strip():
+        return None, "Enter comma-separated values for all selected features."
+
+    parts = [part.strip() for part in raw_value.split(",")]
+    if len(parts) != len(selected_features):
+        return None, (
+            f"Expected {len(selected_features)} values, but received {len(parts)}. "
+            "Match the selected feature order exactly."
+        )
+
+    parsed_row = {}
+    for feature, raw_part in zip(selected_features, parts):
+        if feature not in frame.columns:
+            return None, f"Unknown feature in prediction input: {feature}"
+        if pd.api.types.is_numeric_dtype(frame[feature]):
+            try:
+                parsed_row[feature] = float(raw_part)
+            except ValueError:
+                return None, f"Feature '{feature}' must be numeric."
+        else:
+            if not raw_part:
+                return None, f"Feature '{feature}' cannot be empty."
+            parsed_row[feature] = raw_part
+
+    return parsed_row, ""
+
+
+load_initial_dataset()
 
 app = Dash(__name__)
-app.title = "Avocado Price Dashboard"
+app.title = "Dataset ML Studio"
 server = app.server
 
-if STARTUP_ERROR:
-    app.layout = html.Div(
-        [
-            html.H2("Avocado Price Dashboard"),
-            html.P("The app is running, but required startup data is unavailable."),
-            html.Pre(STARTUP_ERROR, style={"whiteSpace": "pre-wrap"}),
-        ],
-        style={"maxWidth": "1100px", "margin": "20px auto"},
-    )
-else:
-    app.layout = html.Div(
-        [
-            html.H2("Avocado Price Dashboard"),
-            html.Br(),
-            html.Label("Visualization"),
-            dcc.Dropdown(
-                id="viz-mode",
-                options=[
-                    {"label": "Price Trend Over Time", "value": "trend"},
-                    {"label": "Average Price by Region", "value": "region"},
-                    {"label": "Price vs Total Volume", "value": "volume"},
-                ],
-                value="trend",
-                clearable=False,
-            ),
-            dcc.Graph(id="viz-graph"),
-            html.Br(),
-            html.H4("Prediction"),
-            html.Div(
-                [
-                    html.Strong("Feature guide: "),
-                    html.Ul(
-                        [
-                            html.Li("Date: week of observation (YYYY-MM-DD)."),
-                            html.Li("Total Volume: total number of avocados sold."),
-                            html.Li("4046: count sold for PLU 4046 (small Hass)."),
-                            html.Li("4225: count sold for PLU 4225 (large Hass)."),
-                            html.Li("4770: count sold for PLU 4770 (extra-large Hass)."),
-                            html.Li("Total Bags / Small Bags / Large Bags / XLarge Bags: bagged avocado counts by bag size."),
-                            html.Li("type: avocado type (conventional or organic)."),
-                            html.Li("year: calendar year of the record."),
-                            html.Li("region: market/city region."),
-                        ],
-                        style={"marginTop": "6px", "marginBottom": "10px"},
-                    ),
-                ],
-                style={"fontSize": "0.95rem"},
-            ),
-            html.Div(
-                [
-                    html.Div(
-                        [
-                            html.Label(col),
-                            dcc.Input(
-                                id=f"input-{col}",
-                                type="number",
-                                value=float(df[col].dropna().median()),
-                                debounce=True,
+app.layout = html.Div(
+    [
+        html.Div(
+            [
+                html.H1("Dataset ML Studio", style={"marginBottom": "6px"}),
+                html.Div(
+                    "Upload a dataset, choose a numerical target, inspect the bars, train a model, and predict from the trained pipeline.",
+                    style={"color": "#5b6472", "fontSize": "0.98rem"},
+                ),
+            ],
+            style={"marginBottom": "18px"},
+        ),
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.H3("Upload", style={"marginTop": "0"}),
+                        dcc.Upload(
+                            id="dataset-upload",
+                            children=html.Div(["Drag and drop or ", html.A("select a CSV file")]),
+                            style={
+                                "width": "100%",
+                                "padding": "22px",
+                                "borderWidth": "2px",
+                                "borderStyle": "dashed",
+                                "borderRadius": "14px",
+                                "textAlign": "center",
+                                "background": "#f8fafc",
+                                "cursor": "pointer",
+                            },
+                            multiple=False,
+                        ),
+                        html.Div(id="upload-status", style={"marginTop": "10px", "color": "#334155"}),
+                    ],
+                    style={"padding": "18px", "border": "1px solid #dbe3ee", "borderRadius": "16px", "background": "white"},
+                ),
+                html.Div(
+                    [
+                        html.H3("Select Target", style={"marginTop": "0"}),
+                        html.Label("Target variable"),
+                        dcc.Dropdown(
+                            id="target-dropdown",
+                            options=option_list(numeric_columns(CURRENT_DF)),
+                            value=numeric_columns(CURRENT_DF)[0] if numeric_columns(CURRENT_DF) else None,
+                            clearable=False,
+                        ),
+                        html.Div(
+                            "The dropdown only lists numerical columns from the current dataset.",
+                            style={"marginTop": "8px", "fontSize": "0.9rem", "color": "#5b6472"},
+                        ),
+                    ],
+                    style={"padding": "18px", "border": "1px solid #dbe3ee", "borderRadius": "16px", "background": "white"},
+                ),
+            ],
+            style={
+                "display": "grid",
+                "gridTemplateColumns": "1fr 1fr",
+                "gap": "16px",
+                "marginBottom": "16px",
+            },
+        ),
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.H3("Barcharts", style={"marginTop": "0"}),
+                        html.Div("Category variable", style={"marginBottom": "6px", "fontWeight": "600"}),
+                        dcc.RadioItems(
+                            id="category-radio",
+                            options=option_list(categorical_columns(CURRENT_DF, CURRENT_TARGET)),
+                            value=(categorical_columns(CURRENT_DF, CURRENT_TARGET)[0] if categorical_columns(CURRENT_DF, CURRENT_TARGET) else None),
+                            inline=True,
+                            style={"marginBottom": "14px"},
+                        ),
+                        dcc.Graph(
+                            id="category-bar-chart",
+                            figure=build_target_figure(
+                                CURRENT_DF,
+                                CURRENT_TARGET or (numeric_columns(CURRENT_DF)[0] if numeric_columns(CURRENT_DF) else None),
+                                categorical_columns(CURRENT_DF, CURRENT_TARGET or (numeric_columns(CURRENT_DF)[0] if numeric_columns(CURRENT_DF) else None))[
+                                    0
+                                ]
+                                if categorical_columns(CURRENT_DF, CURRENT_TARGET or (numeric_columns(CURRENT_DF)[0] if numeric_columns(CURRENT_DF) else None))
+                                else None,
                             ),
-                        ],
-                        style={"marginBottom": "8px"},
-                    )
-                    for col in numeric_feature_cols
-                ]
-            ),
-            html.Div(
-                [
-                    html.Div(
-                        [
-                            html.Label(col),
-                            dcc.Dropdown(
-                                id=f"input-{col}",
-                                options=category_options(col),
-                                value=text_default(col),
-                                clearable=False,
+                        ),
+                    ],
+                    style={"padding": "18px", "border": "1px solid #dbe3ee", "borderRadius": "16px", "background": "white"},
+                ),
+                html.Div(
+                    [
+                        html.H3("Correlation", style={"marginTop": "0"}),
+                        dcc.Graph(
+                            id="corr-bar-chart",
+                            figure=build_correlation_figure(
+                                CURRENT_DF,
+                                CURRENT_TARGET or (numeric_columns(CURRENT_DF)[0] if numeric_columns(CURRENT_DF) else None),
                             ),
-                        ],
-                        style={"marginBottom": "8px"},
-                    )
-                    for col in categorical_feature_cols
-                ]
-            ),
-            html.Button("Predict Price", id="predict-btn", n_clicks=0),
-            html.Div(id="prediction-output"),
-        ],
-        style={"maxWidth": "1100px", "margin": "20px auto"},
+                        ),
+                    ],
+                    style={"padding": "18px", "border": "1px solid #dbe3ee", "borderRadius": "16px", "background": "white"},
+                ),
+            ],
+            style={
+                "display": "grid",
+                "gridTemplateColumns": "1fr 1fr",
+                "gap": "16px",
+                "marginBottom": "16px",
+            },
+        ),
+        html.Div(
+            [
+                html.H3("Train", style={"marginTop": "0"}),
+                html.Div(
+                    "Choose the features to include in the regression pipeline. Categorical columns are one-hot encoded and missing values are handled automatically.",
+                    style={"marginBottom": "10px", "color": "#5b6472"},
+                ),
+                dcc.Checklist(
+                    id="feature-checklist",
+                    options=option_list(feature_columns(CURRENT_DF, CURRENT_TARGET)),
+                    value=feature_columns(CURRENT_DF, CURRENT_TARGET),
+                    labelStyle={
+                        "display": "inline-block",
+                        "marginRight": "14px",
+                        "marginBottom": "8px",
+                    },
+                    inputStyle={"marginRight": "6px"},
+                ),
+                html.Div(
+                    [
+                        html.Div("Model selection", style={"marginTop": "10px", "marginBottom": "6px", "fontWeight": "600"}),
+                        dcc.Dropdown(
+                            id="model-dropdown",
+                            options=[],
+                            value=None,
+                            clearable=False,
+                            placeholder="Model metrics will populate here",
+                        ),
+                        html.Div(id="model-metrics", style={"marginTop": "12px"}),
+                    ],
+                    style={"marginTop": "8px"},
+                ),
+                html.Button(
+                    "Train Model",
+                    id="train-btn",
+                    n_clicks=0,
+                    style={
+                        "marginTop": "12px",
+                        "padding": "10px 18px",
+                        "border": "0",
+                        "borderRadius": "10px",
+                        "background": "#0f172a",
+                        "color": "white",
+                        "cursor": "pointer",
+                    },
+                ),
+                html.Div(
+                    id="train-status",
+                    children="Status: idle",
+                    style={"marginTop": "10px", "color": "#475569", "fontSize": "0.95rem"},
+                ),
+                html.Div(id="train-output", style={"marginTop": "10px", "fontWeight": "600"}),
+            ],
+            style={"padding": "18px", "border": "1px solid #dbe3ee", "borderRadius": "16px", "background": "white", "marginBottom": "16px"},
+        ),
+        html.Div(
+            [
+                html.H3("Predict", style={"marginTop": "0"}),
+                html.Div(
+                    "Enter feature values as a comma-separated list using the same order as the selected features above.",
+                    style={"marginBottom": "10px", "color": "#5b6472"},
+                ),
+                html.Div(
+                    [
+                        dcc.Input(
+                            id="prediction-input",
+                            type="text",
+                            placeholder=build_prediction_placeholder(feature_columns(CURRENT_DF, CURRENT_TARGET)),
+                            style={
+                                "flex": "1",
+                                "padding": "10px 12px",
+                                "borderRadius": "10px",
+                                "border": "1px solid #cbd5e1",
+                            },
+                        ),
+                        html.Button(
+                            "Predict",
+                            id="predict-btn",
+                            n_clicks=0,
+                            style={
+                                "padding": "10px 18px",
+                                "border": "0",
+                                "borderRadius": "10px",
+                                "background": "#0f172a",
+                                "color": "white",
+                                "cursor": "pointer",
+                            },
+                        ),
+                        html.Div(
+                            id="prediction-output",
+                            style={"alignSelf": "center", "fontWeight": "700", "marginLeft": "10px"},
+                        ),
+                    ],
+                    style={"display": "flex", "gap": "10px", "alignItems": "center"},
+                ),
+            ],
+            style={"padding": "18px", "border": "1px solid #dbe3ee", "borderRadius": "16px", "background": "white"},
+        ),
+    ],
+    style={
+        "maxWidth": "1260px",
+        "margin": "24px auto",
+        "padding": "0 18px 28px",
+        "fontFamily": "Arial, sans-serif",
+        "background": "#eef3f8",
+        "minHeight": "100vh",
+    },
+)
+
+
+@app.callback(
+    Output("upload-status", "children"),
+    Output("target-dropdown", "options"),
+    Output("target-dropdown", "value"),
+    Output("category-radio", "options"),
+    Output("category-radio", "value"),
+    Output("category-bar-chart", "figure"),
+    Output("corr-bar-chart", "figure"),
+    Output("feature-checklist", "options"),
+    Output("feature-checklist", "value"),
+    Output("model-dropdown", "options"),
+    Output("model-dropdown", "value"),
+    Output("model-metrics", "children"),
+    Output("prediction-input", "placeholder"),
+    Input("dataset-upload", "contents"),
+    Input("target-dropdown", "value"),
+    Input("category-radio", "value"),
+    State("dataset-upload", "filename"),
+    State("feature-checklist", "value"),
+)
+def refresh_view(contents, target_value, category_value, filename, selected_features):
+    global CURRENT_TARGET
+
+    triggered = ctx.triggered_id
+    if triggered == "dataset-upload" and contents:
+        try:
+            uploaded_frame = parse_uploaded_file(contents, filename)
+            dataset_name = filename or "Uploaded dataset"
+            set_current_dataframe(uploaded_frame, dataset_name)
+        except Exception as exc:
+            return (
+                f"Upload failed: {exc}",
+                option_list(numeric_columns(CURRENT_DF)),
+                CURRENT_TARGET,
+                option_list(categorical_columns(CURRENT_DF, CURRENT_TARGET)),
+                category_value,
+                build_target_figure(CURRENT_DF, CURRENT_TARGET, category_value),
+                build_correlation_figure(CURRENT_DF, CURRENT_TARGET),
+                option_list(feature_columns(CURRENT_DF, CURRENT_TARGET)),
+                feature_columns(CURRENT_DF, CURRENT_TARGET),
+                [],
+                None,
+                [],
+                build_prediction_placeholder(feature_columns(CURRENT_DF, CURRENT_TARGET)),
+            )
+
+    frame = CURRENT_DF
+    numeric_cols = numeric_columns(frame)
+    if not numeric_cols:
+        CURRENT_TARGET = None
+        target_options = []
+        resolved_target = None
+    else:
+        target_options = option_list(numeric_cols)
+        resolved_target = target_value if target_value in numeric_cols else numeric_cols[0]
+        CURRENT_TARGET = resolved_target
+
+    categorical_cols = categorical_columns(frame, resolved_target)
+    category_options = option_list(categorical_cols)
+    resolved_category = category_value if category_value in categorical_cols else (categorical_cols[0] if categorical_cols else None)
+
+    feature_cols = feature_columns(frame, resolved_target)
+    feature_options = option_list(feature_cols)
+    if selected_features is None:
+        resolved_features = feature_cols
+    else:
+        resolved_features = [feature for feature in selected_features if feature in feature_cols]
+
+    upload_message = f"Loaded {CURRENT_DATASET_NAME}. Rows: {len(frame):,}, columns: {len(frame.columns):,}."
+    target_figure = build_target_figure(frame, resolved_target, resolved_category)
+    corr_figure = build_correlation_figure(frame, resolved_target)
+    model_cards, model_options, task_type, model_message = build_model_metric_cards(frame, resolved_target, resolved_features)
+    model_value = model_options[0]["value"] if model_options else None
+    placeholder = build_prediction_placeholder(resolved_features)
+
+    return (
+        upload_message,
+        target_options,
+        resolved_target,
+        category_options,
+        resolved_category,
+        target_figure,
+        corr_figure,
+        feature_options,
+        resolved_features,
+        model_options,
+        model_value,
+        model_cards if model_cards else ([html.Div(model_message, style={"color": "#475569"})] if model_message else []),
+        placeholder,
     )
 
 
-if not STARTUP_ERROR:
-    @app.callback(
-        Output("viz-graph", "figure"),
-        Input("viz-mode", "value"),
+@app.callback(
+    Output("train-output", "children"),
+    Input("train-btn", "n_clicks"),
+    State("target-dropdown", "value"),
+    State("feature-checklist", "value"),
+    State("model-dropdown", "value"),
+    running=[(Output("train-status", "children"), "Status: training...", "Status: idle")],
+    prevent_initial_call=True,
+)
+def train_model(n_clicks, target_value, selected_features, selected_model):
+    global TRAINED_MODEL, TRAINED_FEATURES, TRAINED_TARGET, TRAINED_TASK_TYPE
+    global LAST_TRAIN_MESSAGE, LAST_PREDICTION_MESSAGE
+
+    logger.info(
+        "Train clicked: n_clicks=%s target=%s features=%s",
+        n_clicks,
+        target_value,
+        selected_features,
     )
-    def update_visualization(mode):
-        if mode == "trend":
-            trend_source = df.copy()
-            trend_source["Date"] = pd.to_datetime(trend_source["Date"], errors="coerce")
-            trend_source = trend_source.dropna(subset=["Date", TARGET, "type"])
-            if trend_source.empty:
-                return px.line(
-                    title="Monthly Average Price Trend by Type (no valid date rows found)"
-                )
-            trend_df = (
-                trend_source.groupby([pd.Grouper(key="Date", freq="ME"), "type"], as_index=False)[TARGET]
-                .mean()
-            )
-            return px.line(
-                trend_df,
-                x="Date",
-                y=TARGET,
-                color="type",
-                title="Monthly Average Price Trend by Type",
-            )
-        if mode == "region":
-            region_df = (
-                df.groupby("region", as_index=False)[TARGET]
-                .mean()
-                .sort_values(by=TARGET, ascending=False)
-                .head(15)
-            )
-            return px.bar(
-                region_df,
-                x="region",
-                y=TARGET,
-                title="Top 15 Regions by Average Price",
-            )
-        sampled = df[["Total Volume", TARGET, "type"]].dropna().sample(
-            n=min(3500, len(df)), random_state=42
+    try:
+        logger.info("Train stage: start")
+        if CURRENT_DF.empty:
+            LAST_TRAIN_MESSAGE = "Upload a dataset before training."
+            logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
+            return LAST_TRAIN_MESSAGE
+        if not target_value or target_value not in CURRENT_DF.columns:
+            LAST_TRAIN_MESSAGE = "Choose a valid numerical target before training."
+            logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
+            return LAST_TRAIN_MESSAGE
+        if not selected_features:
+            LAST_TRAIN_MESSAGE = "Select at least one feature before training."
+            logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
+            return LAST_TRAIN_MESSAGE
+
+        cleaned_features = [feature for feature in selected_features if feature in CURRENT_DF.columns and feature != target_value]
+        logger.info("Train stage: cleaned_features=%s", cleaned_features)
+        if not cleaned_features:
+            LAST_TRAIN_MESSAGE = "Selected features do not contain any usable predictors."
+            logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
+            return LAST_TRAIN_MESSAGE
+
+        X = CURRENT_DF[cleaned_features].copy()
+        y = CURRENT_DF[target_value].copy()
+        task_type = infer_task_type(y)
+        logger.info("Train stage: task_type=%s rows=%s cols=%s", task_type, len(X), len(X.columns))
+        if task_type != "regression":
+            LAST_TRAIN_MESSAGE = "The selected target is not numerical. Choose a numerical target for regression."
+            logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
+            return LAST_TRAIN_MESSAGE
+
+        if len(CURRENT_DF) < 10:
+            LAST_TRAIN_MESSAGE = "Dataset is too small to train a stable model."
+            logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
+            return LAST_TRAIN_MESSAGE
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X,
+            y,
+            test_size=0.2,
+            random_state=42,
         )
-        return px.scatter(
-            sampled,
-            x="Total Volume",
-            y=TARGET,
-            color="type",
-            opacity=0.45,
-            title="Average Price vs Total Volume",
-        )
+        logger.info("Train stage: split complete train_rows=%s test_rows=%s", len(X_train), len(X_test))
+
+        preprocessor = build_preprocessor(X_train)
+        models = get_models(task_type)
+        if selected_model not in models:
+            selected_model = next(iter(models))
+        logger.info("Train stage: selected_model=%s", selected_model)
+        logger.info("Train stage: models=%s", list(models.keys()))
+        best_pipeline = None
+        best_score = float("-inf")
+        best_model_name = ""
+
+        for model_name, model in models.items():
+            logger.info("Train stage: evaluating %s", model_name)
+            pipeline = Pipeline([("preprocessor", preprocessor), ("model", model)])
+            score, _ = evaluate_pipeline(pipeline, X_train, X_test, y_train, y_test, task_type)
+            logger.info("Train stage: %s score=%s", model_name, score)
+            if model_name == selected_model:
+                best_score = score
+                best_model_name = model_name
+                best_pipeline = pipeline
+            elif best_pipeline is None and score > best_score:
+                best_score = score
+                best_model_name = model_name
+                best_pipeline = pipeline
+
+        if best_pipeline is None:
+            LAST_TRAIN_MESSAGE = "Training failed to produce a valid model."
+            logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
+            return LAST_TRAIN_MESSAGE
+
+        logger.info("Train stage: fitting best model=%s on full dataset", best_model_name)
+        best_pipeline.fit(X, y)
+        TRAINED_MODEL = best_pipeline
+        TRAINED_FEATURES = cleaned_features
+        TRAINED_TARGET = target_value
+        TRAINED_TASK_TYPE = task_type
+        LAST_PREDICTION_MESSAGE = ""
+        if task_type == "regression":
+            LAST_TRAIN_MESSAGE = f"Trained {best_model_name}. R^2: {best_score:.4f}"
+        else:
+            LAST_TRAIN_MESSAGE = f"Trained {best_model_name}. Accuracy: {best_score:.4f}"
+        logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
+        return LAST_TRAIN_MESSAGE
+    except Exception as exc:
+        LAST_TRAIN_MESSAGE = f"Training failed: {exc}"
+        logger.exception("Training failed at train callback")
+        return LAST_TRAIN_MESSAGE
 
 
-if not STARTUP_ERROR:
-    @app.callback(
-        Output("prediction-output", "children"),
-        Input("predict-btn", "n_clicks"),
-        [State(f"input-{col}", "value") for col in input_feature_cols],
-    )
-    def predict_price(n_clicks, *values):
-        if n_clicks == 0:
-            return ""
+@app.callback(
+    Output("prediction-output", "children"),
+    Input("predict-btn", "n_clicks"),
+    State("prediction-input", "value"),
+    State("feature-checklist", "value"),
+    State("target-dropdown", "value"),
+)
+def predict_target(n_clicks, raw_prediction, selected_features, target_value):
+    global LAST_PREDICTION_MESSAGE
 
-        model = get_model()
-        if model is None:
-            return MODEL_ERROR or "Model is still warming up. Please try again in a few seconds."
+    if n_clicks == 0:
+        return LAST_PREDICTION_MESSAGE
+    if TRAINED_MODEL is None or not TRAINED_FEATURES:
+        LAST_PREDICTION_MESSAGE = "Train a model before predicting."
+        return LAST_PREDICTION_MESSAGE
+    if selected_features != TRAINED_FEATURES:
+        LAST_PREDICTION_MESSAGE = "Retrain the model after changing the selected features."
+        return LAST_PREDICTION_MESSAGE
+    if TRAINED_TARGET is None or target_value != TRAINED_TARGET:
+        LAST_PREDICTION_MESSAGE = "Retrain the model after changing the target."
+        return LAST_PREDICTION_MESSAGE
 
-        user_input = {}
-        for col, val in zip(input_feature_cols, values):
-            if col in numeric_feature_cols:
-                user_input[col] = numeric_default(col) if val is None else float(val)
-            else:
-                user_input[col] = text_default(col) if val in (None, "") else str(val)
+    parsed_row, error = parse_prediction_values(raw_prediction, TRAINED_FEATURES, CURRENT_DF)
+    if error:
+        LAST_PREDICTION_MESSAGE = error
+        return LAST_PREDICTION_MESSAGE
 
-        if "YearFromDate" in model_feature_cols:
-            if "Date" in user_input:
-                parsed = pd.to_datetime(user_input["Date"], errors="coerce")
-                user_input["YearFromDate"] = parsed.year if not pd.isna(parsed) else int(df["year"].median())
-            else:
-                user_input["YearFromDate"] = int(df["year"].median())
-        if "MonthFromDate" in model_feature_cols:
-            if "Date" in user_input:
-                parsed = pd.to_datetime(user_input["Date"], errors="coerce")
-                user_input["MonthFromDate"] = parsed.month if not pd.isna(parsed) else 1
-            else:
-                user_input["MonthFromDate"] = 1
-
-        for col in model_feature_cols:
-            if col not in user_input:
-                if col in df.columns and pd.api.types.is_numeric_dtype(df[col]):
-                    user_input[col] = numeric_default(col)
-                elif col in df.columns:
-                    user_input[col] = text_default(col)
-                else:
-                    user_input[col] = 0
-
-        sample = pd.DataFrame([user_input], columns=model_feature_cols)
-        prediction = float(model.predict(sample)[0])
-        return f"Predicted AveragePrice: {prediction:.4f}"
+    sample = pd.DataFrame([parsed_row], columns=TRAINED_FEATURES)
+    prediction = float(TRAINED_MODEL.predict(sample)[0])
+    LAST_PREDICTION_MESSAGE = f"Predicted {TRAINED_TARGET}: {prediction:.4f}"
+    return LAST_PREDICTION_MESSAGE
 
 
 if __name__ == "__main__":

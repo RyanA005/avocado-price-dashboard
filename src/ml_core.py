@@ -36,10 +36,14 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
     numeric_transformer = Pipeline(
         steps=[("imputer", SimpleImputer(strategy="median"))]
     )
+    try:
+        categorical_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    except TypeError:
+        categorical_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
     categorical_transformer = Pipeline(
         steps=[
             ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("onehot", OneHotEncoder(handle_unknown="ignore")),
+            ("onehot", categorical_encoder),
         ]
     )
 
