@@ -30,12 +30,32 @@ CURRENT_DF = pd.DataFrame()
 CURRENT_DATASET_NAME = "No dataset loaded"
 CURRENT_TARGET = None
 TRAINED_MODEL = None
+TRAINED_MODELS: dict[str, Pipeline] = {}
+TRAINED_MODEL_NAME = None
 TRAINED_FEATURES: list[str] = []
 TRAINED_TARGET = None
 TRAINED_TASK_TYPE = None
 LAST_TRAIN_MESSAGE = ""
 LAST_PREDICTION_MESSAGE = ""
 UPLOAD_MESSAGE = "Upload a CSV file to replace the current dataset."
+TRAIN_BUTTON_IDLE = "Train Model"
+TRAIN_BUTTON_RUNNING = [
+    html.Span(
+        "",
+        style={
+            "display": "inline-block",
+            "width": "12px",
+            "height": "12px",
+            "marginRight": "8px",
+            "border": "2px solid rgba(255,255,255,0.45)",
+            "borderTopColor": "#ffffff",
+            "borderRadius": "50%",
+            "animation": "dash-spin 0.8s linear infinite",
+            "verticalAlign": "middle",
+        },
+    ),
+    html.Span("Training...", style={"verticalAlign": "middle"}),
+]
 
 
 def load_dataframe(path: str) -> pd.DataFrame:
@@ -45,13 +65,15 @@ def load_dataframe(path: str) -> pd.DataFrame:
 
 def set_current_dataframe(frame: pd.DataFrame, dataset_name: str) -> None:
     global CURRENT_DF, CURRENT_DATASET_NAME, CURRENT_TARGET
-    global TRAINED_MODEL, TRAINED_FEATURES, TRAINED_TARGET, TRAINED_TASK_TYPE
+    global TRAINED_MODEL, TRAINED_MODELS, TRAINED_MODEL_NAME, TRAINED_FEATURES, TRAINED_TARGET, TRAINED_TASK_TYPE
     global LAST_TRAIN_MESSAGE, LAST_PREDICTION_MESSAGE
 
     CURRENT_DF = frame.copy()
     CURRENT_DATASET_NAME = dataset_name
     CURRENT_TARGET = None
     TRAINED_MODEL = None
+    TRAINED_MODELS = {}
+    TRAINED_MODEL_NAME = None
     TRAINED_FEATURES = []
     TRAINED_TARGET = None
     TRAINED_TASK_TYPE = None
@@ -329,6 +351,32 @@ app = Dash(__name__)
 app.title = "Dataset ML Studio"
 server = app.server
 
+app.index_string = """
+<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        {%css%}
+        <style>
+            @keyframes dash-spin {
+                from { transform: rotate(0deg); }
+                to { transform: rotate(360deg); }
+            }
+        </style>
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>
+"""
+
 app.layout = html.Div(
     [
         html.Div(
@@ -550,7 +598,7 @@ app.layout = html.Div(
                     style={"marginTop": "8px"},
                 ),
                 html.Button(
-                    "Train Model",
+                    TRAIN_BUTTON_IDLE,
                     id="train-btn",
                     n_clicks=0,
                     style={
@@ -669,8 +717,9 @@ app.layout = html.Div(
     Input("category-radio", "value"),
     State("dataset-upload", "filename"),
     State("feature-checklist", "value"),
+    State("model-dropdown", "value"),
 )
-def refresh_view(contents, target_value, category_value, filename, selected_features):
+def refresh_view(contents, target_value, category_value, filename, selected_features, selected_model):
     global CURRENT_TARGET
 
     triggered = ctx.triggered_id
@@ -734,7 +783,12 @@ def refresh_view(contents, target_value, category_value, filename, selected_feat
     model_cards, model_options, task_type, model_message = build_model_metric_cards(
         frame, resolved_target, resolved_features
     )
-    model_value = model_options[0]["value"] if model_options else None
+    model_values = {option["value"] for option in model_options}
+    model_value = (
+        TRAINED_MODEL_NAME
+        if TRAINED_MODEL_NAME in model_values
+        else (selected_model if selected_model in model_values else (model_options[0]["value"] if model_options else None))
+    )
     placeholder = build_prediction_placeholder(resolved_features)
 
     return (
@@ -764,17 +818,40 @@ def refresh_view(contents, target_value, category_value, filename, selected_feat
 
 @app.callback(
     Output("train-output", "children"),
+    Output("model-dropdown", "value"),
     Input("train-btn", "n_clicks"),
     State("target-dropdown", "value"),
     State("feature-checklist", "value"),
-    State("model-dropdown", "value"),
     running=[
+        (Output("train-btn", "children"), TRAIN_BUTTON_RUNNING, TRAIN_BUTTON_IDLE),
+        (
+            Output("train-btn", "style"),
+            {
+                "marginTop": "12px",
+                "padding": "10px 18px",
+                "border": "0",
+                "borderRadius": "10px",
+                "background": "#1d4ed8",
+                "color": "white",
+                "cursor": "progress",
+                "opacity": "0.9",
+            },
+            {
+                "marginTop": "12px",
+                "padding": "10px 18px",
+                "border": "0",
+                "borderRadius": "10px",
+                "background": "#0f172a",
+                "color": "white",
+                "cursor": "pointer",
+            },
+        ),
         (Output("train-status", "children"), "Status: training...", "Status: idle")
     ],
     prevent_initial_call=True,
 )
-def train_model(n_clicks, target_value, selected_features, selected_model):
-    global TRAINED_MODEL, TRAINED_FEATURES, TRAINED_TARGET, TRAINED_TASK_TYPE
+def train_model(n_clicks, target_value, selected_features):
+    global TRAINED_MODEL, TRAINED_MODELS, TRAINED_MODEL_NAME, TRAINED_FEATURES, TRAINED_TARGET, TRAINED_TASK_TYPE
     global LAST_TRAIN_MESSAGE, LAST_PREDICTION_MESSAGE
 
     logger.info(
@@ -844,11 +921,8 @@ def train_model(n_clicks, target_value, selected_features, selected_model):
 
         preprocessor = build_preprocessor(X_train)
         models = get_models(task_type)
-        if selected_model not in models:
-            selected_model = next(iter(models))
-        logger.info("Train stage: selected_model=%s", selected_model)
         logger.info("Train stage: models=%s", list(models.keys()))
-        best_pipeline = None
+        trained_models = {}
         best_score = float("-inf")
         best_model_name = ""
 
@@ -859,41 +933,32 @@ def train_model(n_clicks, target_value, selected_features, selected_model):
                 pipeline, X_train, X_test, y_train, y_test, task_type
             )
             logger.info("Train stage: %s score=%s", model_name, score)
-            if model_name == selected_model:
+            pipeline.fit(X, y)
+            trained_models[model_name] = pipeline
+            if score > best_score:
                 best_score = score
                 best_model_name = model_name
-                best_pipeline = pipeline
-            elif best_pipeline is None and score > best_score:
-                best_score = score
-                best_model_name = model_name
-                best_pipeline = pipeline
 
-        if best_pipeline is None:
+        if not trained_models:
             LAST_TRAIN_MESSAGE = "Training failed to produce a valid model."
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-            return LAST_TRAIN_MESSAGE
+            return LAST_TRAIN_MESSAGE, None
 
-        logger.info(
-            "Train stage: fitting best model=%s on full dataset", best_model_name
-        )
-        best_pipeline.fit(X, y)
-        TRAINED_MODEL = best_pipeline
+        logger.info("Train stage: storing trained models=%s", list(trained_models.keys()))
+        TRAINED_MODELS = trained_models
+        TRAINED_MODEL = trained_models[best_model_name]
+        TRAINED_MODEL_NAME = best_model_name
         TRAINED_FEATURES = cleaned_features
         TRAINED_TARGET = target_value
         TRAINED_TASK_TYPE = task_type
         LAST_PREDICTION_MESSAGE = ""
-        if task_type == "regression":
-            LAST_TRAIN_MESSAGE = f"Trained {best_model_name}. R^2: {best_score:.4f}"
-        else:
-            LAST_TRAIN_MESSAGE = (
-                f"Trained {best_model_name}. Accuracy: {best_score:.4f}"
-            )
+        LAST_TRAIN_MESSAGE = f"Trained {len(trained_models)} models. Selected {best_model_name}. R^2: {best_score:.4f}"
         logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-        return LAST_TRAIN_MESSAGE
+        return LAST_TRAIN_MESSAGE, best_model_name
     except Exception as exc:
         LAST_TRAIN_MESSAGE = f"Training failed: {exc}"
         logger.exception("Training failed at train callback")
-        return LAST_TRAIN_MESSAGE
+        return LAST_TRAIN_MESSAGE, None
 
 
 @app.callback(
@@ -902,14 +967,18 @@ def train_model(n_clicks, target_value, selected_features, selected_model):
     State("prediction-input", "value"),
     State("feature-checklist", "value"),
     State("target-dropdown", "value"),
+    State("model-dropdown", "value"),
 )
-def predict_target(n_clicks, raw_prediction, selected_features, target_value):
+def predict_target(n_clicks, raw_prediction, selected_features, target_value, selected_model):
     global LAST_PREDICTION_MESSAGE
 
     if n_clicks == 0:
         return LAST_PREDICTION_MESSAGE
-    if TRAINED_MODEL is None or not TRAINED_FEATURES:
+    if not TRAINED_MODELS or not TRAINED_FEATURES:
         LAST_PREDICTION_MESSAGE = "Train a model before predicting."
+        return LAST_PREDICTION_MESSAGE
+    if selected_model not in TRAINED_MODELS:
+        LAST_PREDICTION_MESSAGE = "Select a trained model before predicting."
         return LAST_PREDICTION_MESSAGE
     if selected_features != TRAINED_FEATURES:
         LAST_PREDICTION_MESSAGE = (
@@ -928,8 +997,8 @@ def predict_target(n_clicks, raw_prediction, selected_features, target_value):
         return LAST_PREDICTION_MESSAGE
 
     sample = pd.DataFrame([parsed_row], columns=TRAINED_FEATURES)
-    prediction = float(TRAINED_MODEL.predict(sample)[0])
-    LAST_PREDICTION_MESSAGE = f"Predicted {TRAINED_TARGET}: {prediction:.4f}"
+    prediction = float(TRAINED_MODELS[selected_model].predict(sample)[0])
+    LAST_PREDICTION_MESSAGE = f"Predicted {TRAINED_TARGET} with {selected_model}: {prediction:.4f}"
     return LAST_PREDICTION_MESSAGE
 
 
