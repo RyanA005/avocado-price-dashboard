@@ -828,11 +828,11 @@ app.layout = html.Div(
                     [
                         "Enter feature values as a comma-separated list using the same order as the selected features above.",
                         html.Div(
-                            ""
-                            + build_prediction_placeholder(
+                            build_prediction_placeholder(
                                 feature_columns(CURRENT_DF, CURRENT_TARGET)
                             ),
                             style={"marginTop": "4px"},
+                            id="prediction-order",
                         ),
                     ],
                     style={"marginBottom": "10px", "color": "#5b6472"},
@@ -928,7 +928,7 @@ def handle_dataset_upload(contents, filename, current_store):
     Output("corr-bar-chart", "figure"),
     Output("feature-checklist", "options"),
     Output("feature-checklist", "value"),
-    Output("prediction-input", "placeholder"),
+    Output("prediction-order", "children"),
     Input("dataset-store", "data"),
     Input("target-dropdown", "value"),
     Input("category-radio", "value"),
@@ -972,7 +972,6 @@ def refresh_view(dataset_data, target_value, category_value, selected_features):
 
     target_figure = build_target_figure(frame, resolved_target, resolved_category)
     corr_figure = build_correlation_figure(frame, resolved_target)
-    placeholder = build_prediction_placeholder(resolved_features)
 
     return (
         target_options,
@@ -983,7 +982,7 @@ def refresh_view(dataset_data, target_value, category_value, selected_features):
         corr_figure,
         feature_options,
         resolved_features,
-        placeholder,
+        build_prediction_placeholder(resolved_features),
     )
 
 
