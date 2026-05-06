@@ -20,7 +20,7 @@ from ml_core import (
 
 
 def main():
-    excluded_features = {"id"}
+    excluded_features = {"id", "Date"}
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default="data/avocado.csv")
     parser.add_argument("--target", type=str, default="AveragePrice")
@@ -64,6 +64,7 @@ def main():
 
     results = []
     best_pipeline = None
+    best_model_name = ""
     best_score = float("-inf")
 
     for model_name, model in models.items():
@@ -98,6 +99,7 @@ def main():
         if selection_score > best_score:
             best_score = selection_score
             best_pipeline = trained_pipeline
+            best_model_name = model_name
 
     report_df = pd.DataFrame(results).sort_values(by="cv_score", ascending=False)
     report_path = os.path.join(args.artifacts_dir, "model_report.csv")
@@ -115,7 +117,7 @@ def main():
     metrics_payload = {
         "task_type": task_type,
         "target": args.target,
-        "best_model": report_df.iloc[0]["model"],
+        "best_model": best_model_name,
         "selected_features": selected_features,
         "feature_selection_report_path": corr_path,
         "report_path": report_path,

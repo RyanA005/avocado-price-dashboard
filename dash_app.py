@@ -7,7 +7,7 @@ from typing import Iterable
 
 import pandas as pd
 import plotly.express as px
-from dash import Dash, Input, Output, State, ctx, dcc, html
+from dash import Dash, Input, Output, State, dcc, html
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
@@ -37,6 +37,8 @@ TRAINED_TARGET = None
 TRAINED_TASK_TYPE = None
 LAST_TRAIN_MESSAGE = ""
 LAST_PREDICTION_MESSAGE = ""
+TRAINING_VERSION = 0
+MODEL_METRICS_CACHE: dict[tuple[str, int, str | None, tuple[str, ...]], tuple] = {}
 UPLOAD_MESSAGE = "Upload a CSV file to replace the current dataset."
 TRAIN_BUTTON_IDLE = "Train Model"
 TRAIN_BUTTON_RUNNING = [
@@ -63,10 +65,20 @@ def load_dataframe(path: str) -> pd.DataFrame:
     return clean_dataframe(frame)
 
 
+def dataframe_to_store(frame: pd.DataFrame) -> str:
+    return frame.to_json(orient="split", date_format="iso")
+
+
+def dataframe_from_store(data: str | None) -> pd.DataFrame:
+    if not data:
+        return pd.DataFrame()
+    return pd.read_json(io.StringIO(data), orient="split")
+
+
 def set_current_dataframe(frame: pd.DataFrame, dataset_name: str) -> None:
     global CURRENT_DF, CURRENT_DATASET_NAME, CURRENT_TARGET
     global TRAINED_MODEL, TRAINED_MODELS, TRAINED_MODEL_NAME, TRAINED_FEATURES, TRAINED_TARGET, TRAINED_TASK_TYPE
-    global LAST_TRAIN_MESSAGE, LAST_PREDICTION_MESSAGE
+    global LAST_TRAIN_MESSAGE, LAST_PREDICTION_MESSAGE, MODEL_METRICS_CACHE, TRAINING_VERSION
 
     CURRENT_DF = frame.copy()
     CURRENT_DATASET_NAME = dataset_name
@@ -79,6 +91,8 @@ def set_current_dataframe(frame: pd.DataFrame, dataset_name: str) -> None:
     TRAINED_TASK_TYPE = None
     LAST_TRAIN_MESSAGE = ""
     LAST_PREDICTION_MESSAGE = ""
+    TRAINING_VERSION = 0
+    MODEL_METRICS_CACHE = {}
 
 
 def load_initial_dataset() -> None:
@@ -129,6 +143,13 @@ def option_list(columns: Iterable[str]) -> list[dict]:
     return [{"label": column, "value": column} for column in columns]
 
 
+def graph_category_options(frame: pd.DataFrame, target: str | None) -> list[dict]:
+    categories = categorical_columns(frame, target)
+    if "Date" in frame.columns:
+        categories = ["Date"] + categories
+    return option_list(categories)
+
+
 def empty_figure(title: str, message: str) -> dict:
     figure = px.bar(title=title)
     figure.add_annotation(
@@ -148,7 +169,45 @@ def build_target_figure(frame: pd.DataFrame, target: str, category: str | None):
         return empty_figure(
             "Average Target by Category", "Select a valid target column."
         )
-    if not category or category not in frame.columns:
+    if not category:
+        return empty_figure(
+            "Average Target by Category",
+            "Select a categorical variable for the first chart.",
+        )
+
+    if category == "Date" and "Date" in frame.columns:
+        date_series = pd.to_datetime(frame["Date"], errors="coerce")
+        chart_source = pd.DataFrame(
+            {
+                "DateCategory": date_series.dt.to_period("M"),
+                target: frame[target],
+            }
+        )
+        chart_df = (
+            chart_source.dropna()
+            .groupby("DateCategory", as_index=False)[target]
+            .mean()
+            .sort_values(by="DateCategory")
+        )
+        if chart_df.empty:
+            return empty_figure(
+                "Average Target by Category", "No valid rows found for this chart."
+            )
+        chart_df["DateCategory"] = chart_df["DateCategory"].astype(str)
+        figure = px.bar(
+            chart_df,
+            x="DateCategory",
+            y=target,
+            title=f"Average {target} by Date (monthly)",
+        )
+        figure.update_layout(
+            template="plotly_white",
+            xaxis_title="Date (month)",
+            yaxis_title=f"Average {target}",
+        )
+        return figure
+
+    if category not in frame.columns:
         return empty_figure(
             "Average Target by Category",
             "Select a categorical variable for the first chart.",
@@ -260,7 +319,12 @@ def build_model_metric_cards(
         if feature in frame.columns and feature != target
     ]
     if not cleaned_features:
-        return [], [], "None", "Select at least one usable feature to view model metrics."
+        return (
+            [],
+            [],
+            "None",
+            "Select at least one usable feature to view model metrics.",
+        )
 
     y = frame[target].copy()
     task_type = infer_task_type(y)
@@ -315,6 +379,27 @@ def build_model_metric_cards(
     return cards, options, task_type, ""
 
 
+def get_cached_model_metrics(
+    dataset_key: str | None,
+    training_version: int,
+    frame: pd.DataFrame,
+    target: str | None,
+    selected_features: list[str],
+) -> tuple[list[html.Div], list[dict], str, str]:
+    cleaned_features = tuple(
+        feature
+        for feature in selected_features
+        if feature in frame.columns and feature != target
+    )
+    cache_key = (dataset_key or "", training_version, target, cleaned_features)
+    if cache_key in MODEL_METRICS_CACHE:
+        return MODEL_METRICS_CACHE[cache_key]
+
+    result = build_model_metric_cards(frame, target, list(cleaned_features))
+    MODEL_METRICS_CACHE[cache_key] = result
+    return result
+
+
 def parse_prediction_values(
     raw_value: str | None, selected_features: list[str], frame: pd.DataFrame
 ):
@@ -346,6 +431,18 @@ def parse_prediction_values(
 
 
 load_initial_dataset()
+
+INITIAL_TARGET = numeric_columns(CURRENT_DF)[0] if numeric_columns(CURRENT_DF) else None
+INITIAL_FEATURES = feature_columns(CURRENT_DF, INITIAL_TARGET)
+(
+    INITIAL_MODEL_CARDS,
+    INITIAL_MODEL_OPTIONS,
+    _INITIAL_MODEL_TASK_TYPE,
+    INITIAL_MODEL_MESSAGE,
+) = build_model_metric_cards(CURRENT_DF, INITIAL_TARGET, INITIAL_FEATURES)
+INITIAL_MODEL_VALUE = (
+    INITIAL_MODEL_OPTIONS[0]["value"] if INITIAL_MODEL_OPTIONS else None
+)
 
 app = Dash(__name__)
 app.title = "Dataset ML Studio"
@@ -379,11 +476,16 @@ app.index_string = """
 
 app.layout = html.Div(
     [
+        dcc.Store(id="dataset-store", data=dataframe_to_store(CURRENT_DF)),
+        dcc.Store(id="training-version", data=TRAINING_VERSION),
         html.Div(
             [
-                html.H1("Dataset ML Studio", style={"marginBottom": "6px"}),
+                html.H1(
+                    "CS301 Project - Track 1 - Avocado price estimator",
+                    style={"marginBottom": "6px"},
+                ),
                 html.Div(
-                    "Upload a dataset, choose a numerical target, inspect the bars, train a model, and predict from the trained pipeline.",
+                    "Ryan Alport, Chad-soma Foster, Aruntej Thummepally, Armen Deroian",
                     style={"color": "#5b6472", "fontSize": "0.98rem"},
                 ),
             ],
@@ -411,12 +513,17 @@ app.layout = html.Div(
                             },
                             multiple=False,
                         ),
-                        html.Div(
-                            id="upload-status",
-                            style={
-                                "marginTop": "10px",
-                                "color": "#334155",
-                            },
+                        dcc.Loading(
+                            html.Div(
+                                id="upload-status",
+                                children=UPLOAD_MESSAGE,
+                                style={
+                                    "marginTop": "10px",
+                                    "color": "#334155",
+                                },
+                            ),
+                            show_initially=False,
+                            delay_show=150,
                         ),
                     ],
                     style={
@@ -475,47 +582,49 @@ app.layout = html.Div(
                         ),
                         dcc.RadioItems(
                             id="category-radio",
-                            options=option_list(
-                                categorical_columns(CURRENT_DF, CURRENT_TARGET)
-                            ),
+                            options=graph_category_options(CURRENT_DF, CURRENT_TARGET),
                             value=(
-                                categorical_columns(CURRENT_DF, CURRENT_TARGET)[0]
-                                if categorical_columns(CURRENT_DF, CURRENT_TARGET)
+                                graph_category_options(CURRENT_DF, CURRENT_TARGET)[0][
+                                    "value"
+                                ]
+                                if graph_category_options(CURRENT_DF, CURRENT_TARGET)
                                 else None
                             ),
                             inline=True,
                             style={"marginBottom": "14px"},
                         ),
-                        dcc.Graph(
-                            id="category-bar-chart",
-                            figure=build_target_figure(
-                                CURRENT_DF,
-                                CURRENT_TARGET
-                                or (
-                                    numeric_columns(CURRENT_DF)[0]
-                                    if numeric_columns(CURRENT_DF)
-                                    else None
-                                ),
-                                (
-                                    categorical_columns(
-                                        CURRENT_DF,
-                                        CURRENT_TARGET
-                                        or (
-                                            numeric_columns(CURRENT_DF)[0]
-                                            if numeric_columns(CURRENT_DF)
-                                            else None
-                                        ),
-                                    )[0]
-                                    if categorical_columns(
-                                        CURRENT_DF,
-                                        CURRENT_TARGET
-                                        or (
-                                            numeric_columns(CURRENT_DF)[0]
-                                            if numeric_columns(CURRENT_DF)
-                                            else None
-                                        ),
-                                    )
-                                    else None
+                        dcc.Loading(
+                            dcc.Graph(
+                                id="category-bar-chart",
+                                figure=build_target_figure(
+                                    CURRENT_DF,
+                                    CURRENT_TARGET
+                                    or (
+                                        numeric_columns(CURRENT_DF)[0]
+                                        if numeric_columns(CURRENT_DF)
+                                        else None
+                                    ),
+                                    (
+                                        graph_category_options(
+                                            CURRENT_DF,
+                                            CURRENT_TARGET
+                                            or (
+                                                numeric_columns(CURRENT_DF)[0]
+                                                if numeric_columns(CURRENT_DF)
+                                                else None
+                                            ),
+                                        )[0]["value"]
+                                        if graph_category_options(
+                                            CURRENT_DF,
+                                            CURRENT_TARGET
+                                            or (
+                                                numeric_columns(CURRENT_DF)[0]
+                                                if numeric_columns(CURRENT_DF)
+                                                else None
+                                            ),
+                                        )
+                                        else None
+                                    ),
                                 ),
                             ),
                         ),
@@ -530,15 +639,17 @@ app.layout = html.Div(
                 html.Div(
                     [
                         html.H3("Correlation", style={"marginTop": "0"}),
-                        dcc.Graph(
-                            id="corr-bar-chart",
-                            figure=build_correlation_figure(
-                                CURRENT_DF,
-                                CURRENT_TARGET
-                                or (
-                                    numeric_columns(CURRENT_DF)[0]
-                                    if numeric_columns(CURRENT_DF)
-                                    else None
+                        dcc.Loading(
+                            dcc.Graph(
+                                id="corr-bar-chart",
+                                figure=build_correlation_figure(
+                                    CURRENT_DF,
+                                    CURRENT_TARGET
+                                    or (
+                                        numeric_columns(CURRENT_DF)[0]
+                                        if numeric_columns(CURRENT_DF)
+                                        else None
+                                    ),
                                 ),
                             ),
                         ),
@@ -588,12 +699,29 @@ app.layout = html.Div(
                         ),
                         dcc.Dropdown(
                             id="model-dropdown",
-                            options=[],
-                            value=None,
+                            options=INITIAL_MODEL_OPTIONS,
+                            value=INITIAL_MODEL_VALUE,
                             clearable=False,
                             placeholder="Model metrics will populate here",
                         ),
-                        html.Div(id="model-metrics", style={"marginTop": "12px"}),
+                        html.Div(
+                            id="model-metrics",
+                            children=(
+                                INITIAL_MODEL_CARDS
+                                if INITIAL_MODEL_CARDS
+                                else (
+                                    [
+                                        html.Div(
+                                            INITIAL_MODEL_MESSAGE,
+                                            style={"color": "#475569"},
+                                        )
+                                    ]
+                                    if INITIAL_MODEL_MESSAGE
+                                    else []
+                                )
+                            ),
+                            style={"marginTop": "12px"},
+                        ),
                     ],
                     style={"marginTop": "8px"},
                 ),
@@ -636,7 +764,14 @@ app.layout = html.Div(
             [
                 html.H3("Predict", style={"marginTop": "0"}),
                 html.Div(
-                    "Enter feature values as a comma-separated list using the same order as the selected features above.",
+                    [
+                        "Enter feature values as a comma-separated list using the same order as the selected features above.",
+                        html.Div(
+                            "Selected order: "
+                            + ", ".join(feature_columns(CURRENT_DF, CURRENT_TARGET)),
+                            style={"marginTop": "4px"},
+                        ),
+                    ],
                     style={"marginBottom": "10px", "color": "#5b6472"},
                 ),
                 html.Div(
@@ -649,7 +784,7 @@ app.layout = html.Div(
                             ),
                             style={
                                 "flex": "1",
-                                "padding": "10px 12px",
+                                "padding": "10px 22px",
                                 "borderRadius": "10px",
                                 "border": "1px solid #cbd5e1",
                             },
@@ -699,7 +834,29 @@ app.layout = html.Div(
 
 
 @app.callback(
+    Output("dataset-store", "data"),
     Output("upload-status", "children"),
+    Input("dataset-upload", "contents"),
+    State("dataset-upload", "filename"),
+    State("dataset-store", "data"),
+    prevent_initial_call=True,
+)
+def handle_dataset_upload(contents, filename, current_store):
+    if not contents:
+        return current_store, UPLOAD_MESSAGE
+    try:
+        uploaded_frame = parse_uploaded_file(contents, filename)
+        dataset_name = filename or "Uploaded dataset"
+        set_current_dataframe(uploaded_frame, dataset_name)
+        return (
+            dataframe_to_store(CURRENT_DF),
+            f"Loaded {CURRENT_DATASET_NAME}. Rows: {len(CURRENT_DF):,}, columns: {len(CURRENT_DF.columns):,}.",
+        )
+    except Exception as exc:
+        return current_store, f"Upload failed: {exc}"
+
+
+@app.callback(
     Output("target-dropdown", "options"),
     Output("target-dropdown", "value"),
     Output("category-radio", "options"),
@@ -708,46 +865,18 @@ app.layout = html.Div(
     Output("corr-bar-chart", "figure"),
     Output("feature-checklist", "options"),
     Output("feature-checklist", "value"),
-    Output("model-dropdown", "options"),
-    Output("model-dropdown", "value"),
-    Output("model-metrics", "children"),
     Output("prediction-input", "placeholder"),
-    Input("dataset-upload", "contents"),
+    Input("dataset-store", "data"),
     Input("target-dropdown", "value"),
     Input("category-radio", "value"),
-    State("dataset-upload", "filename"),
     State("feature-checklist", "value"),
-    State("model-dropdown", "value"),
 )
-def refresh_view(contents, target_value, category_value, filename, selected_features, selected_model):
+def refresh_view(dataset_data, target_value, category_value, selected_features):
     global CURRENT_TARGET
 
-    triggered = ctx.triggered_id
-    if triggered == "dataset-upload" and contents:
-        try:
-            uploaded_frame = parse_uploaded_file(contents, filename)
-            dataset_name = filename or "Uploaded dataset"
-            set_current_dataframe(uploaded_frame, dataset_name)
-        except Exception as exc:
-            return (
-                f"Upload failed: {exc}",
-                option_list(numeric_columns(CURRENT_DF)),
-                CURRENT_TARGET,
-                option_list(categorical_columns(CURRENT_DF, CURRENT_TARGET)),
-                category_value,
-                build_target_figure(CURRENT_DF, CURRENT_TARGET, category_value),
-                build_correlation_figure(CURRENT_DF, CURRENT_TARGET),
-                option_list(feature_columns(CURRENT_DF, CURRENT_TARGET)),
-                feature_columns(CURRENT_DF, CURRENT_TARGET),
-                [],
-                None,
-                [],
-                build_prediction_placeholder(
-                    feature_columns(CURRENT_DF, CURRENT_TARGET)
-                ),
-            )
-
-    frame = CURRENT_DF
+    frame = dataframe_from_store(dataset_data)
+    if frame.empty and not CURRENT_DF.empty:
+        frame = CURRENT_DF
     numeric_cols = numeric_columns(frame)
     if not numeric_cols:
         CURRENT_TARGET = None
@@ -760,12 +889,13 @@ def refresh_view(contents, target_value, category_value, filename, selected_feat
         )
         CURRENT_TARGET = resolved_target
 
-    categorical_cols = categorical_columns(frame, resolved_target)
-    category_options = option_list(categorical_cols)
+    graph_categories = graph_category_options(frame, resolved_target)
+    graph_category_values = {option["value"] for option in graph_categories}
+    category_options = graph_categories
     resolved_category = (
         category_value
-        if category_value in categorical_cols
-        else (categorical_cols[0] if categorical_cols else None)
+        if category_value in graph_category_values
+        else (graph_categories[0]["value"] if graph_categories else None)
     )
 
     feature_cols = feature_columns(frame, resolved_target)
@@ -777,22 +907,11 @@ def refresh_view(contents, target_value, category_value, filename, selected_feat
             feature for feature in selected_features if feature in feature_cols
         ]
 
-    upload_message = f"Loaded {CURRENT_DATASET_NAME}. Rows: {len(frame):,}, columns: {len(frame.columns):,}."
     target_figure = build_target_figure(frame, resolved_target, resolved_category)
     corr_figure = build_correlation_figure(frame, resolved_target)
-    model_cards, model_options, task_type, model_message = build_model_metric_cards(
-        frame, resolved_target, resolved_features
-    )
-    model_values = {option["value"] for option in model_options}
-    model_value = (
-        TRAINED_MODEL_NAME
-        if TRAINED_MODEL_NAME in model_values
-        else (selected_model if selected_model in model_values else (model_options[0]["value"] if model_options else None))
-    )
     placeholder = build_prediction_placeholder(resolved_features)
 
     return (
-        upload_message,
         target_options,
         resolved_target,
         category_options,
@@ -801,24 +920,64 @@ def refresh_view(contents, target_value, category_value, filename, selected_feat
         corr_figure,
         feature_options,
         resolved_features,
+        placeholder,
+    )
+
+
+@app.callback(
+    Output("model-dropdown", "options"),
+    Output("model-dropdown", "value", allow_duplicate=True),
+    Output("model-metrics", "children"),
+    Input("dataset-store", "data"),
+    Input("training-version", "data"),
+    Input("target-dropdown", "value"),
+    Input("feature-checklist", "value"),
+    State("model-dropdown", "value"),
+    prevent_initial_call=True,
+)
+def update_model_metrics(
+    dataset_data, training_version, target_value, selected_features, selected_model
+):
+    frame = dataframe_from_store(dataset_data)
+    if frame.empty and not CURRENT_DF.empty:
+        frame = CURRENT_DF
+
+    cards, model_options, _task_type, model_message = get_cached_model_metrics(
+        dataset_data,
+        training_version or 0,
+        frame,
+        target_value,
+        selected_features or [],
+    )
+    model_values = {option["value"] for option in model_options}
+    model_value = (
+        TRAINED_MODEL_NAME
+        if TRAINED_MODEL_NAME in model_values
+        else (
+            selected_model
+            if selected_model in model_values
+            else (model_options[0]["value"] if model_options else None)
+        )
+    )
+    return (
         model_options,
         model_value,
         (
-            model_cards
-            if model_cards
+            cards
+            if cards
             else (
                 [html.Div(model_message, style={"color": "#475569"})]
                 if model_message
                 else []
             )
         ),
-        placeholder,
     )
 
 
 @app.callback(
     Output("train-output", "children"),
     Output("model-dropdown", "value"),
+    Output("training-version", "data"),
     Input("train-btn", "n_clicks"),
     State("target-dropdown", "value"),
     State("feature-checklist", "value"),
@@ -846,13 +1005,20 @@ def refresh_view(contents, target_value, category_value, filename, selected_feat
                 "cursor": "pointer",
             },
         ),
-        (Output("train-status", "children"), "Status: training...", "Status: idle")
+        (Output("train-status", "children"), "Status: training...", "Status: idle"),
     ],
     prevent_initial_call=True,
 )
 def train_model(n_clicks, target_value, selected_features):
     global TRAINED_MODEL, TRAINED_MODELS, TRAINED_MODEL_NAME, TRAINED_FEATURES, TRAINED_TARGET, TRAINED_TASK_TYPE
-    global LAST_TRAIN_MESSAGE, LAST_PREDICTION_MESSAGE
+    global LAST_TRAIN_MESSAGE, LAST_PREDICTION_MESSAGE, TRAINING_VERSION
+
+    TRAINED_MODEL = None
+    TRAINED_MODELS = {}
+    TRAINED_MODEL_NAME = None
+    TRAINED_FEATURES = []
+    TRAINED_TARGET = None
+    TRAINED_TASK_TYPE = None
 
     logger.info(
         "Train clicked: n_clicks=%s target=%s features=%s",
@@ -865,15 +1031,15 @@ def train_model(n_clicks, target_value, selected_features):
         if CURRENT_DF.empty:
             LAST_TRAIN_MESSAGE = "Upload a dataset before training."
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-            return LAST_TRAIN_MESSAGE
+            return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
         if not target_value or target_value not in CURRENT_DF.columns:
             LAST_TRAIN_MESSAGE = "Choose a valid numerical target before training."
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-            return LAST_TRAIN_MESSAGE
+            return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
         if not selected_features:
             LAST_TRAIN_MESSAGE = "Select at least one feature before training."
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-            return LAST_TRAIN_MESSAGE
+            return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
 
         cleaned_features = [
             feature
@@ -886,7 +1052,7 @@ def train_model(n_clicks, target_value, selected_features):
                 "Selected features do not contain any usable predictors."
             )
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-            return LAST_TRAIN_MESSAGE
+            return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
 
         X = CURRENT_DF[cleaned_features].copy()
         y = CURRENT_DF[target_value].copy()
@@ -900,12 +1066,12 @@ def train_model(n_clicks, target_value, selected_features):
         if task_type != "regression":
             LAST_TRAIN_MESSAGE = "The selected target is not numerical. Choose a numerical target for regression."
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-            return LAST_TRAIN_MESSAGE
+            return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
 
         if len(CURRENT_DF) < 10:
             LAST_TRAIN_MESSAGE = "Dataset is too small to train a stable model."
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-            return LAST_TRAIN_MESSAGE
+            return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
 
         X_train, X_test, y_train, y_test = train_test_split(
             X,
@@ -942,9 +1108,11 @@ def train_model(n_clicks, target_value, selected_features):
         if not trained_models:
             LAST_TRAIN_MESSAGE = "Training failed to produce a valid model."
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-            return LAST_TRAIN_MESSAGE, None
+            return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
 
-        logger.info("Train stage: storing trained models=%s", list(trained_models.keys()))
+        logger.info(
+            "Train stage: storing trained models=%s", list(trained_models.keys())
+        )
         TRAINED_MODELS = trained_models
         TRAINED_MODEL = trained_models[best_model_name]
         TRAINED_MODEL_NAME = best_model_name
@@ -952,13 +1120,14 @@ def train_model(n_clicks, target_value, selected_features):
         TRAINED_TARGET = target_value
         TRAINED_TASK_TYPE = task_type
         LAST_PREDICTION_MESSAGE = ""
+        TRAINING_VERSION += 1
         LAST_TRAIN_MESSAGE = f"Trained {len(trained_models)} models. Selected {best_model_name}. R^2: {best_score:.4f}"
         logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
-        return LAST_TRAIN_MESSAGE, best_model_name
+        return LAST_TRAIN_MESSAGE, best_model_name, TRAINING_VERSION
     except Exception as exc:
         LAST_TRAIN_MESSAGE = f"Training failed: {exc}"
         logger.exception("Training failed at train callback")
-        return LAST_TRAIN_MESSAGE, None
+        return LAST_TRAIN_MESSAGE, None, TRAINING_VERSION
 
 
 @app.callback(
@@ -969,7 +1138,9 @@ def train_model(n_clicks, target_value, selected_features):
     State("target-dropdown", "value"),
     State("model-dropdown", "value"),
 )
-def predict_target(n_clicks, raw_prediction, selected_features, target_value, selected_model):
+def predict_target(
+    n_clicks, raw_prediction, selected_features, target_value, selected_model
+):
     global LAST_PREDICTION_MESSAGE
 
     if n_clicks == 0:
@@ -998,7 +1169,9 @@ def predict_target(n_clicks, raw_prediction, selected_features, target_value, se
 
     sample = pd.DataFrame([parsed_row], columns=TRAINED_FEATURES)
     prediction = float(TRAINED_MODELS[selected_model].predict(sample)[0])
-    LAST_PREDICTION_MESSAGE = f"Predicted {TRAINED_TARGET} with {selected_model}: {prediction:.4f}"
+    LAST_PREDICTION_MESSAGE = (
+        f"Predicted {TRAINED_TARGET} with {selected_model}: {prediction:.4f}"
+    )
     return LAST_PREDICTION_MESSAGE
 
 
