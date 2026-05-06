@@ -38,6 +38,7 @@ TRAINED_TASK_TYPE = None
 LAST_TRAIN_MESSAGE = ""
 LAST_PREDICTION_MESSAGE = ""
 TRAINING_VERSION = 0
+MODEL_METRICS_STATE = {"options": [], "value": None, "cards": [], "message": ""}
 MODEL_METRICS_CACHE: dict[tuple[str, int, str | None, tuple[str, ...]], tuple] = {}
 UPLOAD_MESSAGE = "Upload a CSV file to replace the current dataset."
 TRAIN_BUTTON_IDLE = "Train Model"
@@ -79,6 +80,7 @@ def set_current_dataframe(frame: pd.DataFrame, dataset_name: str) -> None:
     global CURRENT_DF, CURRENT_DATASET_NAME, CURRENT_TARGET
     global TRAINED_MODEL, TRAINED_MODELS, TRAINED_MODEL_NAME, TRAINED_FEATURES, TRAINED_TARGET, TRAINED_TASK_TYPE
     global LAST_TRAIN_MESSAGE, LAST_PREDICTION_MESSAGE, MODEL_METRICS_CACHE, TRAINING_VERSION
+    global MODEL_METRICS_STATE
 
     CURRENT_DF = frame.copy()
     CURRENT_DATASET_NAME = dataset_name
@@ -93,6 +95,7 @@ def set_current_dataframe(frame: pd.DataFrame, dataset_name: str) -> None:
     LAST_PREDICTION_MESSAGE = ""
     TRAINING_VERSION = 0
     MODEL_METRICS_CACHE = {}
+    MODEL_METRICS_STATE = {"options": [], "value": None, "cards": [], "message": ""}
 
 
 def load_initial_dataset() -> None:
@@ -400,6 +403,50 @@ def get_cached_model_metrics(
     return result
 
 
+def set_model_metrics_state(
+    dataset_key: str | None,
+    training_version: int,
+    frame: pd.DataFrame,
+    target: str | None,
+    selected_features: list[str],
+    selected_model: str | None = None,
+) -> dict:
+    global MODEL_METRICS_STATE
+
+    cards, model_options, _task_type, model_message = get_cached_model_metrics(
+        dataset_key,
+        training_version,
+        frame,
+        target,
+        selected_features,
+    )
+    model_values = {option["value"] for option in model_options}
+    model_value = (
+        TRAINED_MODEL_NAME
+        if TRAINED_MODEL_NAME in model_values
+        else (
+            selected_model
+            if selected_model in model_values
+            else (model_options[0]["value"] if model_options else None)
+        )
+    )
+    MODEL_METRICS_STATE = {
+        "options": model_options,
+        "value": model_value,
+        "cards": (
+            cards
+            if cards
+            else (
+                [html.Div(model_message, style={"color": "#475569"})]
+                if model_message
+                else []
+            )
+        ),
+        "message": model_message,
+    }
+    return MODEL_METRICS_STATE
+
+
 def parse_prediction_values(
     raw_value: str | None, selected_features: list[str], frame: pd.DataFrame
 ):
@@ -443,6 +490,20 @@ INITIAL_FEATURES = feature_columns(CURRENT_DF, INITIAL_TARGET)
 INITIAL_MODEL_VALUE = (
     INITIAL_MODEL_OPTIONS[0]["value"] if INITIAL_MODEL_OPTIONS else None
 )
+MODEL_METRICS_STATE = {
+    "options": INITIAL_MODEL_OPTIONS,
+    "value": INITIAL_MODEL_VALUE,
+    "cards": (
+        INITIAL_MODEL_CARDS
+        if INITIAL_MODEL_CARDS
+        else (
+            [html.Div(INITIAL_MODEL_MESSAGE, style={"color": "#475569"})]
+            if INITIAL_MODEL_MESSAGE
+            else []
+        )
+    ),
+    "message": INITIAL_MODEL_MESSAGE,
+}
 
 app = Dash(__name__)
 app.title = "Dataset ML Studio"
@@ -767,8 +828,10 @@ app.layout = html.Div(
                     [
                         "Enter feature values as a comma-separated list using the same order as the selected features above.",
                         html.Div(
-                            "Selected order: "
-                            + ", ".join(feature_columns(CURRENT_DF, CURRENT_TARGET)),
+                            ""
+                            + build_prediction_placeholder(
+                                feature_columns(CURRENT_DF, CURRENT_TARGET)
+                            ),
                             style={"marginTop": "4px"},
                         ),
                     ],
@@ -784,7 +847,7 @@ app.layout = html.Div(
                             ),
                             style={
                                 "flex": "1",
-                                "padding": "10px 22px",
+                                "padding": "20px 22px",
                                 "borderRadius": "10px",
                                 "border": "1px solid #cbd5e1",
                             },
@@ -942,36 +1005,15 @@ def update_model_metrics(
     if frame.empty and not CURRENT_DF.empty:
         frame = CURRENT_DF
 
-    cards, model_options, _task_type, model_message = get_cached_model_metrics(
+    state = set_model_metrics_state(
         dataset_data,
         training_version or 0,
         frame,
         target_value,
         selected_features or [],
+        selected_model,
     )
-    model_values = {option["value"] for option in model_options}
-    model_value = (
-        TRAINED_MODEL_NAME
-        if TRAINED_MODEL_NAME in model_values
-        else (
-            selected_model
-            if selected_model in model_values
-            else (model_options[0]["value"] if model_options else None)
-        )
-    )
-    return (
-        model_options,
-        model_value,
-        (
-            cards
-            if cards
-            else (
-                [html.Div(model_message, style={"color": "#475569"})]
-                if model_message
-                else []
-            )
-        ),
-    )
+    return state["options"], state["value"], state["cards"]
 
 
 @app.callback(
@@ -1121,6 +1163,14 @@ def train_model(n_clicks, target_value, selected_features):
         TRAINED_TASK_TYPE = task_type
         LAST_PREDICTION_MESSAGE = ""
         TRAINING_VERSION += 1
+        set_model_metrics_state(
+            CURRENT_DATASET_NAME,
+            TRAINING_VERSION,
+            CURRENT_DF,
+            target_value,
+            cleaned_features,
+            best_model_name,
+        )
         LAST_TRAIN_MESSAGE = f"Trained {len(trained_models)} models. Selected {best_model_name}. R^2: {best_score:.4f}"
         logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
         return LAST_TRAIN_MESSAGE, best_model_name, TRAINING_VERSION
