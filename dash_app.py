@@ -19,7 +19,6 @@ from src.ml_core import (
     infer_task_type,
 )
 
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -81,7 +80,8 @@ def numeric_columns(frame: pd.DataFrame) -> list[str]:
     return [
         column
         for column in frame.columns
-        if pd.api.types.is_numeric_dtype(frame[column]) and column not in EXCLUDED_FEATURES
+        if pd.api.types.is_numeric_dtype(frame[column])
+        and column not in EXCLUDED_FEATURES
     ]
 
 
@@ -96,7 +96,11 @@ def categorical_columns(frame: pd.DataFrame, target: str | None) -> list[str]:
 
 
 def feature_columns(frame: pd.DataFrame, target: str | None) -> list[str]:
-    return [column for column in frame.columns if column != target and column not in EXCLUDED_FEATURES]
+    return [
+        column
+        for column in frame.columns
+        if column != target and column not in EXCLUDED_FEATURES
+    ]
 
 
 def option_list(columns: Iterable[str]) -> list[dict]:
@@ -119,7 +123,9 @@ def empty_figure(title: str, message: str) -> dict:
 
 def build_target_figure(frame: pd.DataFrame, target: str, category: str | None):
     if not target or target not in frame.columns:
-        return empty_figure("Average Target by Category", "Select a valid target column.")
+        return empty_figure(
+            "Average Target by Category", "Select a valid target column."
+        )
     if not category or category not in frame.columns:
         return empty_figure(
             "Average Target by Category",
@@ -134,7 +140,9 @@ def build_target_figure(frame: pd.DataFrame, target: str, category: str | None):
         .sort_values(by=target, ascending=False)
     )
     if chart_df.empty:
-        return empty_figure("Average Target by Category", "No valid rows found for this chart.")
+        return empty_figure(
+            "Average Target by Category", "No valid rows found for this chart."
+        )
 
     figure = px.bar(
         chart_df,
@@ -142,13 +150,17 @@ def build_target_figure(frame: pd.DataFrame, target: str, category: str | None):
         y=target,
         title=f"Average {target} by {category}",
     )
-    figure.update_layout(template="plotly_white", xaxis_title=category, yaxis_title=f"Average {target}")
+    figure.update_layout(
+        template="plotly_white", xaxis_title=category, yaxis_title=f"Average {target}"
+    )
     return figure
 
 
 def build_correlation_figure(frame: pd.DataFrame, target: str):
     if not target or target not in frame.columns:
-        return empty_figure("Absolute Correlation Strength", "Select a valid target column.")
+        return empty_figure(
+            "Absolute Correlation Strength", "Select a valid target column."
+        )
     if not pd.api.types.is_numeric_dtype(frame[target]):
         return empty_figure(
             "Absolute Correlation Strength",
@@ -211,20 +223,29 @@ def build_model_metric_cards(
     frame: pd.DataFrame,
     target: str | None,
     selected_features: list[str],
-) -> tuple[list[html.Div], list[dict], dict[str, dict[str, float]], str, str]:
-    if frame.empty or not target or target not in frame.columns or not selected_features:
-        return [], [], {}, "None", "Select features and a target to view model metrics."
+) -> tuple[list[html.Div], list[dict], str, str]:
+    if (
+        frame.empty
+        or not target
+        or target not in frame.columns
+        or not selected_features
+    ):
+        return [], [], "None", "Select features and a target to view model metrics."
 
-    cleaned_features = [feature for feature in selected_features if feature in frame.columns and feature != target]
+    cleaned_features = [
+        feature
+        for feature in selected_features
+        if feature in frame.columns and feature != target
+    ]
     if not cleaned_features:
-        return [], [], {}, "None", "Select at least one usable feature to view model metrics."
+        return [], [], "None", "Select at least one usable feature to view model metrics."
 
     y = frame[target].copy()
     task_type = infer_task_type(y)
     X = frame[cleaned_features].copy()
 
     if len(frame) < 10:
-        return [], [], {}, task_type, "Dataset is too small to estimate model metrics."
+        return [], [], task_type, "Dataset is too small to estimate model metrics."
 
     X_train, X_test, y_train, y_test = train_test_split(
         X,
@@ -237,11 +258,11 @@ def build_model_metric_cards(
 
     cards = []
     options = []
-    metrics_by_model: dict[str, dict[str, float]] = {}
     for model_name, model in models.items():
         pipeline = Pipeline([("preprocessor", preprocessor), ("model", model)])
-        metric_1, metric_2 = evaluate_pipeline(pipeline, X_train, X_test, y_train, y_test, task_type)
-        metrics_by_model[model_name] = {"metric_1": float(metric_1), "metric_2": float(metric_2)}
+        metric_1, metric_2 = evaluate_pipeline(
+            pipeline, X_train, X_test, y_train, y_test, task_type
+        )
         if task_type == "regression":
             label = f"{model_name} - R^2: {metric_1:.4f}, RMSE: {metric_2:.4f}"
             subtitle = f"R^2: {metric_1:.4f} | RMSE: {metric_2:.4f}"
@@ -251,8 +272,12 @@ def build_model_metric_cards(
         cards.append(
             html.Div(
                 [
-                    html.Div(model_name, style={"fontWeight": "700", "marginBottom": "4px"}),
-                    html.Div(subtitle, style={"color": "#475569", "fontSize": "0.94rem"}),
+                    html.Div(
+                        model_name, style={"fontWeight": "700", "marginBottom": "4px"}
+                    ),
+                    html.Div(
+                        subtitle, style={"color": "#475569", "fontSize": "0.94rem"}
+                    ),
                 ],
                 style={
                     "padding": "10px 12px",
@@ -265,10 +290,12 @@ def build_model_metric_cards(
         )
         options.append({"label": label, "value": model_name})
 
-    return cards, options, metrics_by_model, task_type, ""
+    return cards, options, task_type, ""
 
 
-def parse_prediction_values(raw_value: str | None, selected_features: list[str], frame: pd.DataFrame):
+def parse_prediction_values(
+    raw_value: str | None, selected_features: list[str], frame: pd.DataFrame
+):
     if not raw_value or not raw_value.strip():
         return None, "Enter comma-separated values for all selected features."
 
@@ -321,9 +348,11 @@ app.layout = html.Div(
                         html.H3("Upload", style={"marginTop": "0"}),
                         dcc.Upload(
                             id="dataset-upload",
-                            children=html.Div(["Drag and drop or ", html.A("select a CSV file")]),
+                            children=html.Div(
+                                ["Drag and drop or ", html.A("select a CSV file")]
+                            ),
                             style={
-                                "width": "100%",
+                                "width": "60%",
                                 "padding": "22px",
                                 "borderWidth": "2px",
                                 "borderStyle": "dashed",
@@ -334,9 +363,20 @@ app.layout = html.Div(
                             },
                             multiple=False,
                         ),
-                        html.Div(id="upload-status", style={"marginTop": "10px", "color": "#334155"}),
+                        html.Div(
+                            id="upload-status",
+                            style={
+                                "marginTop": "10px",
+                                "color": "#334155",
+                            },
+                        ),
                     ],
-                    style={"padding": "18px", "border": "1px solid #dbe3ee", "borderRadius": "16px", "background": "white"},
+                    style={
+                        "padding": "18px",
+                        "border": "1px solid #dbe3ee",
+                        "borderRadius": "16px",
+                        "background": "white",
+                    },
                 ),
                 html.Div(
                     [
@@ -345,15 +385,28 @@ app.layout = html.Div(
                         dcc.Dropdown(
                             id="target-dropdown",
                             options=option_list(numeric_columns(CURRENT_DF)),
-                            value=numeric_columns(CURRENT_DF)[0] if numeric_columns(CURRENT_DF) else None,
+                            value=(
+                                numeric_columns(CURRENT_DF)[0]
+                                if numeric_columns(CURRENT_DF)
+                                else None
+                            ),
                             clearable=False,
                         ),
                         html.Div(
                             "The dropdown only lists numerical columns from the current dataset.",
-                            style={"marginTop": "8px", "fontSize": "0.9rem", "color": "#5b6472"},
+                            style={
+                                "marginTop": "8px",
+                                "fontSize": "0.9rem",
+                                "color": "#5b6472",
+                            },
                         ),
                     ],
-                    style={"padding": "18px", "border": "1px solid #dbe3ee", "borderRadius": "16px", "background": "white"},
+                    style={
+                        "padding": "18px",
+                        "border": "1px solid #dbe3ee",
+                        "borderRadius": "16px",
+                        "background": "white",
+                    },
                 ),
             ],
             style={
@@ -368,11 +421,20 @@ app.layout = html.Div(
                 html.Div(
                     [
                         html.H3("Barcharts", style={"marginTop": "0"}),
-                        html.Div("Category variable", style={"marginBottom": "6px", "fontWeight": "600"}),
+                        html.Div(
+                            "Category variable",
+                            style={"marginBottom": "6px", "fontWeight": "600"},
+                        ),
                         dcc.RadioItems(
                             id="category-radio",
-                            options=option_list(categorical_columns(CURRENT_DF, CURRENT_TARGET)),
-                            value=(categorical_columns(CURRENT_DF, CURRENT_TARGET)[0] if categorical_columns(CURRENT_DF, CURRENT_TARGET) else None),
+                            options=option_list(
+                                categorical_columns(CURRENT_DF, CURRENT_TARGET)
+                            ),
+                            value=(
+                                categorical_columns(CURRENT_DF, CURRENT_TARGET)[0]
+                                if categorical_columns(CURRENT_DF, CURRENT_TARGET)
+                                else None
+                            ),
                             inline=True,
                             style={"marginBottom": "14px"},
                         ),
@@ -380,16 +442,42 @@ app.layout = html.Div(
                             id="category-bar-chart",
                             figure=build_target_figure(
                                 CURRENT_DF,
-                                CURRENT_TARGET or (numeric_columns(CURRENT_DF)[0] if numeric_columns(CURRENT_DF) else None),
-                                categorical_columns(CURRENT_DF, CURRENT_TARGET or (numeric_columns(CURRENT_DF)[0] if numeric_columns(CURRENT_DF) else None))[
-                                    0
-                                ]
-                                if categorical_columns(CURRENT_DF, CURRENT_TARGET or (numeric_columns(CURRENT_DF)[0] if numeric_columns(CURRENT_DF) else None))
-                                else None,
+                                CURRENT_TARGET
+                                or (
+                                    numeric_columns(CURRENT_DF)[0]
+                                    if numeric_columns(CURRENT_DF)
+                                    else None
+                                ),
+                                (
+                                    categorical_columns(
+                                        CURRENT_DF,
+                                        CURRENT_TARGET
+                                        or (
+                                            numeric_columns(CURRENT_DF)[0]
+                                            if numeric_columns(CURRENT_DF)
+                                            else None
+                                        ),
+                                    )[0]
+                                    if categorical_columns(
+                                        CURRENT_DF,
+                                        CURRENT_TARGET
+                                        or (
+                                            numeric_columns(CURRENT_DF)[0]
+                                            if numeric_columns(CURRENT_DF)
+                                            else None
+                                        ),
+                                    )
+                                    else None
+                                ),
                             ),
                         ),
                     ],
-                    style={"padding": "18px", "border": "1px solid #dbe3ee", "borderRadius": "16px", "background": "white"},
+                    style={
+                        "padding": "18px",
+                        "border": "1px solid #dbe3ee",
+                        "borderRadius": "16px",
+                        "background": "white",
+                    },
                 ),
                 html.Div(
                     [
@@ -398,11 +486,21 @@ app.layout = html.Div(
                             id="corr-bar-chart",
                             figure=build_correlation_figure(
                                 CURRENT_DF,
-                                CURRENT_TARGET or (numeric_columns(CURRENT_DF)[0] if numeric_columns(CURRENT_DF) else None),
+                                CURRENT_TARGET
+                                or (
+                                    numeric_columns(CURRENT_DF)[0]
+                                    if numeric_columns(CURRENT_DF)
+                                    else None
+                                ),
                             ),
                         ),
                     ],
-                    style={"padding": "18px", "border": "1px solid #dbe3ee", "borderRadius": "16px", "background": "white"},
+                    style={
+                        "padding": "18px",
+                        "border": "1px solid #dbe3ee",
+                        "borderRadius": "16px",
+                        "background": "white",
+                    },
                 ),
             ],
             style={
@@ -432,7 +530,14 @@ app.layout = html.Div(
                 ),
                 html.Div(
                     [
-                        html.Div("Model selection", style={"marginTop": "10px", "marginBottom": "6px", "fontWeight": "600"}),
+                        html.Div(
+                            "Model selection",
+                            style={
+                                "marginTop": "10px",
+                                "marginBottom": "6px",
+                                "fontWeight": "600",
+                            },
+                        ),
                         dcc.Dropdown(
                             id="model-dropdown",
                             options=[],
@@ -461,11 +566,23 @@ app.layout = html.Div(
                 html.Div(
                     id="train-status",
                     children="Status: idle",
-                    style={"marginTop": "10px", "color": "#475569", "fontSize": "0.95rem"},
+                    style={
+                        "marginTop": "10px",
+                        "color": "#475569",
+                        "fontSize": "0.95rem",
+                    },
                 ),
-                html.Div(id="train-output", style={"marginTop": "10px", "fontWeight": "600"}),
+                html.Div(
+                    id="train-output", style={"marginTop": "10px", "fontWeight": "600"}
+                ),
             ],
-            style={"padding": "18px", "border": "1px solid #dbe3ee", "borderRadius": "16px", "background": "white", "marginBottom": "16px"},
+            style={
+                "padding": "18px",
+                "border": "1px solid #dbe3ee",
+                "borderRadius": "16px",
+                "background": "white",
+                "marginBottom": "16px",
+            },
         ),
         html.Div(
             [
@@ -479,7 +596,9 @@ app.layout = html.Div(
                         dcc.Input(
                             id="prediction-input",
                             type="text",
-                            placeholder=build_prediction_placeholder(feature_columns(CURRENT_DF, CURRENT_TARGET)),
+                            placeholder=build_prediction_placeholder(
+                                feature_columns(CURRENT_DF, CURRENT_TARGET)
+                            ),
                             style={
                                 "flex": "1",
                                 "padding": "10px 12px",
@@ -502,13 +621,22 @@ app.layout = html.Div(
                         ),
                         html.Div(
                             id="prediction-output",
-                            style={"alignSelf": "center", "fontWeight": "700", "marginLeft": "10px"},
+                            style={
+                                "alignSelf": "center",
+                                "fontWeight": "700",
+                                "marginLeft": "10px",
+                            },
                         ),
                     ],
                     style={"display": "flex", "gap": "10px", "alignItems": "center"},
                 ),
             ],
-            style={"padding": "18px", "border": "1px solid #dbe3ee", "borderRadius": "16px", "background": "white"},
+            style={
+                "padding": "18px",
+                "border": "1px solid #dbe3ee",
+                "borderRadius": "16px",
+                "background": "white",
+            },
         ),
     ],
     style={
@@ -565,7 +693,9 @@ def refresh_view(contents, target_value, category_value, filename, selected_feat
                 [],
                 None,
                 [],
-                build_prediction_placeholder(feature_columns(CURRENT_DF, CURRENT_TARGET)),
+                build_prediction_placeholder(
+                    feature_columns(CURRENT_DF, CURRENT_TARGET)
+                ),
             )
 
     frame = CURRENT_DF
@@ -576,24 +706,34 @@ def refresh_view(contents, target_value, category_value, filename, selected_feat
         resolved_target = None
     else:
         target_options = option_list(numeric_cols)
-        resolved_target = target_value if target_value in numeric_cols else numeric_cols[0]
+        resolved_target = (
+            target_value if target_value in numeric_cols else numeric_cols[0]
+        )
         CURRENT_TARGET = resolved_target
 
     categorical_cols = categorical_columns(frame, resolved_target)
     category_options = option_list(categorical_cols)
-    resolved_category = category_value if category_value in categorical_cols else (categorical_cols[0] if categorical_cols else None)
+    resolved_category = (
+        category_value
+        if category_value in categorical_cols
+        else (categorical_cols[0] if categorical_cols else None)
+    )
 
     feature_cols = feature_columns(frame, resolved_target)
     feature_options = option_list(feature_cols)
     if selected_features is None:
         resolved_features = feature_cols
     else:
-        resolved_features = [feature for feature in selected_features if feature in feature_cols]
+        resolved_features = [
+            feature for feature in selected_features if feature in feature_cols
+        ]
 
     upload_message = f"Loaded {CURRENT_DATASET_NAME}. Rows: {len(frame):,}, columns: {len(frame.columns):,}."
     target_figure = build_target_figure(frame, resolved_target, resolved_category)
     corr_figure = build_correlation_figure(frame, resolved_target)
-    model_cards, model_options, task_type, model_message = build_model_metric_cards(frame, resolved_target, resolved_features)
+    model_cards, model_options, task_type, model_message = build_model_metric_cards(
+        frame, resolved_target, resolved_features
+    )
     model_value = model_options[0]["value"] if model_options else None
     placeholder = build_prediction_placeholder(resolved_features)
 
@@ -609,7 +749,15 @@ def refresh_view(contents, target_value, category_value, filename, selected_feat
         resolved_features,
         model_options,
         model_value,
-        model_cards if model_cards else ([html.Div(model_message, style={"color": "#475569"})] if model_message else []),
+        (
+            model_cards
+            if model_cards
+            else (
+                [html.Div(model_message, style={"color": "#475569"})]
+                if model_message
+                else []
+            )
+        ),
         placeholder,
     )
 
@@ -620,7 +768,9 @@ def refresh_view(contents, target_value, category_value, filename, selected_feat
     State("target-dropdown", "value"),
     State("feature-checklist", "value"),
     State("model-dropdown", "value"),
-    running=[(Output("train-status", "children"), "Status: training...", "Status: idle")],
+    running=[
+        (Output("train-status", "children"), "Status: training...", "Status: idle")
+    ],
     prevent_initial_call=True,
 )
 def train_model(n_clicks, target_value, selected_features, selected_model):
@@ -648,17 +798,28 @@ def train_model(n_clicks, target_value, selected_features, selected_model):
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
             return LAST_TRAIN_MESSAGE
 
-        cleaned_features = [feature for feature in selected_features if feature in CURRENT_DF.columns and feature != target_value]
+        cleaned_features = [
+            feature
+            for feature in selected_features
+            if feature in CURRENT_DF.columns and feature != target_value
+        ]
         logger.info("Train stage: cleaned_features=%s", cleaned_features)
         if not cleaned_features:
-            LAST_TRAIN_MESSAGE = "Selected features do not contain any usable predictors."
+            LAST_TRAIN_MESSAGE = (
+                "Selected features do not contain any usable predictors."
+            )
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
             return LAST_TRAIN_MESSAGE
 
         X = CURRENT_DF[cleaned_features].copy()
         y = CURRENT_DF[target_value].copy()
         task_type = infer_task_type(y)
-        logger.info("Train stage: task_type=%s rows=%s cols=%s", task_type, len(X), len(X.columns))
+        logger.info(
+            "Train stage: task_type=%s rows=%s cols=%s",
+            task_type,
+            len(X),
+            len(X.columns),
+        )
         if task_type != "regression":
             LAST_TRAIN_MESSAGE = "The selected target is not numerical. Choose a numerical target for regression."
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
@@ -675,7 +836,11 @@ def train_model(n_clicks, target_value, selected_features, selected_model):
             test_size=0.2,
             random_state=42,
         )
-        logger.info("Train stage: split complete train_rows=%s test_rows=%s", len(X_train), len(X_test))
+        logger.info(
+            "Train stage: split complete train_rows=%s test_rows=%s",
+            len(X_train),
+            len(X_test),
+        )
 
         preprocessor = build_preprocessor(X_train)
         models = get_models(task_type)
@@ -690,7 +855,9 @@ def train_model(n_clicks, target_value, selected_features, selected_model):
         for model_name, model in models.items():
             logger.info("Train stage: evaluating %s", model_name)
             pipeline = Pipeline([("preprocessor", preprocessor), ("model", model)])
-            score, _ = evaluate_pipeline(pipeline, X_train, X_test, y_train, y_test, task_type)
+            score, _ = evaluate_pipeline(
+                pipeline, X_train, X_test, y_train, y_test, task_type
+            )
             logger.info("Train stage: %s score=%s", model_name, score)
             if model_name == selected_model:
                 best_score = score
@@ -706,7 +873,9 @@ def train_model(n_clicks, target_value, selected_features, selected_model):
             logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
             return LAST_TRAIN_MESSAGE
 
-        logger.info("Train stage: fitting best model=%s on full dataset", best_model_name)
+        logger.info(
+            "Train stage: fitting best model=%s on full dataset", best_model_name
+        )
         best_pipeline.fit(X, y)
         TRAINED_MODEL = best_pipeline
         TRAINED_FEATURES = cleaned_features
@@ -716,7 +885,9 @@ def train_model(n_clicks, target_value, selected_features, selected_model):
         if task_type == "regression":
             LAST_TRAIN_MESSAGE = f"Trained {best_model_name}. R^2: {best_score:.4f}"
         else:
-            LAST_TRAIN_MESSAGE = f"Trained {best_model_name}. Accuracy: {best_score:.4f}"
+            LAST_TRAIN_MESSAGE = (
+                f"Trained {best_model_name}. Accuracy: {best_score:.4f}"
+            )
         logger.info("Train result: %s", LAST_TRAIN_MESSAGE)
         return LAST_TRAIN_MESSAGE
     except Exception as exc:
@@ -741,13 +912,17 @@ def predict_target(n_clicks, raw_prediction, selected_features, target_value):
         LAST_PREDICTION_MESSAGE = "Train a model before predicting."
         return LAST_PREDICTION_MESSAGE
     if selected_features != TRAINED_FEATURES:
-        LAST_PREDICTION_MESSAGE = "Retrain the model after changing the selected features."
+        LAST_PREDICTION_MESSAGE = (
+            "Retrain the model after changing the selected features."
+        )
         return LAST_PREDICTION_MESSAGE
     if TRAINED_TARGET is None or target_value != TRAINED_TARGET:
         LAST_PREDICTION_MESSAGE = "Retrain the model after changing the target."
         return LAST_PREDICTION_MESSAGE
 
-    parsed_row, error = parse_prediction_values(raw_prediction, TRAINED_FEATURES, CURRENT_DF)
+    parsed_row, error = parse_prediction_values(
+        raw_prediction, TRAINED_FEATURES, CURRENT_DF
+    )
     if error:
         LAST_PREDICTION_MESSAGE = error
         return LAST_PREDICTION_MESSAGE
