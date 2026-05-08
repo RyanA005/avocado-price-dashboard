@@ -4,7 +4,11 @@ from typing import Dict, Tuple
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import GradientBoostingRegressor, RandomForestClassifier, RandomForestRegressor
+from sklearn.ensemble import (
+    GradientBoostingRegressor,
+    RandomForestClassifier,
+    RandomForestRegressor,
+)
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import accuracy_score, f1_score, mean_squared_error, r2_score
@@ -37,7 +41,9 @@ def build_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
         steps=[("imputer", SimpleImputer(strategy="median"))]
     )
     try:
-        categorical_encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+        categorical_encoder = OneHotEncoder(
+            handle_unknown="ignore", sparse_output=False
+        )
     except TypeError:
         categorical_encoder = OneHotEncoder(handle_unknown="ignore", sparse=False)
     categorical_transformer = Pipeline(
@@ -97,7 +103,9 @@ def select_features_by_correlation(
             selected_numeric = selected_numeric[:max_numeric_features]
 
     if not selected_numeric and numeric_features:
-        selected_numeric = numeric_features[: min(max_numeric_features, len(numeric_features))]
+        selected_numeric = numeric_features[
+            : min(max_numeric_features, len(numeric_features))
+        ]
 
     selected_features = selected_numeric + categorical_features
     if corr_df.empty:
@@ -117,7 +125,12 @@ def get_models(task_type: str) -> Dict[str, object]:
         }
     return {
         "LogisticRegression": LogisticRegression(max_iter=2000),
-        "RandomForestClassifier": RandomForestClassifier(random_state=42),
+        "RandomForestRegressor": RandomForestRegressor(
+            n_estimators=160,
+            max_depth=16,
+            random_state=42,
+            n_jobs=-1,
+        ),
     }
 
 
@@ -174,7 +187,9 @@ def tune_model(
     return search.best_estimator_
 
 
-def cross_validation_score(pipeline: Pipeline, X: pd.DataFrame, y: pd.Series, task_type: str) -> float:
+def cross_validation_score(
+    pipeline: Pipeline, X: pd.DataFrame, y: pd.Series, task_type: str
+) -> float:
     if task_type == "regression":
         scores = cross_val_score(pipeline, X, y, cv=5, scoring="r2")
     else:
@@ -185,4 +200,3 @@ def cross_validation_score(pipeline: Pipeline, X: pd.DataFrame, y: pd.Series, ta
 def write_metrics_json(path: str, payload: Dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
-
