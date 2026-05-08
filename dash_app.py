@@ -452,7 +452,12 @@ def set_model_metrics_state(
 
 def render_model_metrics_state(state: dict | None):
     if not state:
-        return [], None, []
+        return [], None, [
+            html.Div(
+                "Train a model to load the model cards and score labels.",
+                style={"color": "#475569"},
+            )
+        ]
     return state.get("options", []), state.get("value"), state.get("cards", [])
 
 
@@ -488,30 +493,16 @@ def parse_prediction_values(
 
 load_initial_dataset()
 
-INITIAL_TARGET = numeric_columns(CURRENT_DF)[0] if numeric_columns(CURRENT_DF) else None
-INITIAL_FEATURES = feature_columns(CURRENT_DF, INITIAL_TARGET)
-(
-    INITIAL_MODEL_CARDS,
-    INITIAL_MODEL_OPTIONS,
-    _INITIAL_MODEL_TASK_TYPE,
-    INITIAL_MODEL_MESSAGE,
-) = build_model_metric_cards(CURRENT_DF, INITIAL_TARGET, INITIAL_FEATURES)
-INITIAL_MODEL_VALUE = (
-    INITIAL_MODEL_OPTIONS[0]["value"] if INITIAL_MODEL_OPTIONS else None
-)
 MODEL_METRICS_STATE = {
-    "options": INITIAL_MODEL_OPTIONS,
-    "value": INITIAL_MODEL_VALUE,
-    "cards": (
-        INITIAL_MODEL_CARDS
-        if INITIAL_MODEL_CARDS
-        else (
-            [html.Div(INITIAL_MODEL_MESSAGE, style={"color": "#475569"})]
-            if INITIAL_MODEL_MESSAGE
-            else []
+    "options": [],
+    "value": None,
+    "cards": [
+        html.Div(
+            "Train a model to load the model cards and score labels.",
+            style={"color": "#475569"},
         )
-    ),
-    "message": INITIAL_MODEL_MESSAGE,
+    ],
+    "message": "Train a model to load the model cards and score labels.",
 }
 
 app = Dash(__name__)
@@ -770,27 +761,14 @@ app.layout = html.Div(
                         ),
                         dcc.Dropdown(
                             id="model-dropdown",
-                            options=INITIAL_MODEL_OPTIONS,
-                            value=INITIAL_MODEL_VALUE,
+                            options=[],
+                            value=None,
                             clearable=False,
                             placeholder="Model metrics will populate here",
                         ),
                         html.Div(
                             id="model-metrics",
-                            children=(
-                                INITIAL_MODEL_CARDS
-                                if INITIAL_MODEL_CARDS
-                                else (
-                                    [
-                                        html.Div(
-                                            INITIAL_MODEL_MESSAGE,
-                                            style={"color": "#475569"},
-                                        )
-                                    ]
-                                    if INITIAL_MODEL_MESSAGE
-                                    else []
-                                )
-                            ),
+                            children=MODEL_METRICS_STATE["cards"],
                             style={"marginTop": "12px"},
                         ),
                     ],
@@ -932,22 +910,20 @@ def handle_dataset_upload(contents, filename, current_store):
         uploaded_frame = parse_uploaded_file(contents, filename)
         dataset_name = filename or "Uploaded dataset"
         set_current_dataframe(uploaded_frame, dataset_name)
-        initial_target = (
-            numeric_columns(CURRENT_DF)[0] if numeric_columns(CURRENT_DF) else None
-        )
-        initial_features = feature_columns(CURRENT_DF, initial_target)
-        metrics_state = set_model_metrics_state(
-            dataset_name,
-            0,
-            CURRENT_DF,
-            initial_target,
-            initial_features,
-            None,
-        )
         return (
             dataframe_to_store(CURRENT_DF),
             f"Loaded {CURRENT_DATASET_NAME}. Rows: {len(CURRENT_DF):,}, columns: {len(CURRENT_DF.columns):,}.",
-            metrics_state,
+            {
+                "options": [],
+                "value": None,
+                "cards": [
+                    html.Div(
+                        "Train a model to load the model cards and score labels.",
+                        style={"color": "#475569"},
+                    )
+                ],
+                "message": "Train a model to load the model cards and score labels.",
+            },
         )
     except Exception as exc:
         return current_store, f"Upload failed: {exc}", MODEL_METRICS_STATE
