@@ -41,6 +41,7 @@ TRAINING_VERSION = 0
 MODEL_METRICS_STATE = {"options": [], "value": None, "cards": [], "message": ""}
 MODEL_METRICS_CACHE: dict[tuple[str, int, str | None, tuple[str, ...]], tuple] = {}
 UPLOAD_MESSAGE = "Upload a CSV file to replace the current dataset."
+MODEL_METRICS_EMPTY_MESSAGE = "Train a model to load the model cards and score labels."
 DEFAULT_PREDICTION_PLACEHOLDER = (
     "Select features first, then enter values in the same order separated by commas."
 )
@@ -79,6 +80,15 @@ def dataframe_from_store(data: str | None) -> pd.DataFrame:
     return pd.read_json(io.StringIO(data), orient="split")
 
 
+def empty_model_metrics_state() -> dict:
+    return {
+        "options": [],
+        "value": None,
+        "cards": [html.Div(MODEL_METRICS_EMPTY_MESSAGE, style={"color": "#475569"})],
+        "message": MODEL_METRICS_EMPTY_MESSAGE,
+    }
+
+
 def set_current_dataframe(frame: pd.DataFrame, dataset_name: str) -> None:
     global CURRENT_DF, CURRENT_DATASET_NAME, CURRENT_TARGET
     global TRAINED_MODEL, TRAINED_MODELS, TRAINED_MODEL_NAME, TRAINED_FEATURES, TRAINED_TARGET, TRAINED_TASK_TYPE
@@ -98,7 +108,7 @@ def set_current_dataframe(frame: pd.DataFrame, dataset_name: str) -> None:
     LAST_PREDICTION_MESSAGE = ""
     TRAINING_VERSION = 0
     MODEL_METRICS_CACHE = {}
-    MODEL_METRICS_STATE = {"options": [], "value": None, "cards": [], "message": ""}
+    MODEL_METRICS_STATE = empty_model_metrics_state()
 
 
 def load_initial_dataset() -> None:
@@ -111,10 +121,7 @@ def load_initial_dataset() -> None:
 def parse_uploaded_file(contents: str, filename: str | None) -> pd.DataFrame:
     _, content_string = contents.split(",", 1)
     decoded = base64.b64decode(content_string)
-    if filename and filename.lower().endswith(".csv"):
-        frame = pd.read_csv(io.StringIO(decoded.decode("utf-8")))
-    else:
-        frame = pd.read_csv(io.StringIO(decoded.decode("utf-8")))
+    frame = pd.read_csv(io.StringIO(decoded.decode("utf-8")))
     return clean_dataframe(frame)
 
 
@@ -122,8 +129,6 @@ def numeric_columns(frame: pd.DataFrame) -> list[str]:
     return [
         column
         for column in frame.columns
-        if pd.api.types.is_numeric_dtype(frame[column])
-        and column not in EXCLUDED_FEATURES
         if pd.api.types.is_numeric_dtype(frame[column])
         and column not in EXCLUDED_FEATURES
     ]
@@ -140,11 +145,6 @@ def categorical_columns(frame: pd.DataFrame, target: str | None) -> list[str]:
 
 
 def feature_columns(frame: pd.DataFrame, target: str | None) -> list[str]:
-    return [
-        column
-        for column in frame.columns
-        if column != target and column not in EXCLUDED_FEATURES
-    ]
     return [
         column
         for column in frame.columns
@@ -237,9 +237,6 @@ def build_target_figure(frame: pd.DataFrame, target: str, category: str | None):
         return empty_figure(
             "Average Target by Category", "No valid rows found for this chart."
         )
-        return empty_figure(
-            "Average Target by Category", "No valid rows found for this chart."
-        )
 
     figure = px.bar(
         chart_df,
@@ -250,17 +247,11 @@ def build_target_figure(frame: pd.DataFrame, target: str, category: str | None):
     figure.update_layout(
         template="plotly_white", xaxis_title=category, yaxis_title=f"Average {target}"
     )
-    figure.update_layout(
-        template="plotly_white", xaxis_title=category, yaxis_title=f"Average {target}"
-    )
     return figure
 
 
 def build_correlation_figure(frame: pd.DataFrame, target: str):
     if not target or target not in frame.columns:
-        return empty_figure(
-            "Absolute Correlation Strength", "Select a valid target column."
-        )
         return empty_figure(
             "Absolute Correlation Strength", "Select a valid target column."
         )
@@ -334,20 +325,7 @@ def build_model_metric_cards(
         or not selected_features
     ):
         return [], [], "None", "Select features and a target to view model metrics."
-) -> tuple[list[html.Div], list[dict], str, str]:
-    if (
-        frame.empty
-        or not target
-        or target not in frame.columns
-        or not selected_features
-    ):
-        return [], [], "None", "Select features and a target to view model metrics."
 
-    cleaned_features = [
-        feature
-        for feature in selected_features
-        if feature in frame.columns and feature != target
-    ]
     cleaned_features = [
         feature
         for feature in selected_features
@@ -367,7 +345,6 @@ def build_model_metric_cards(
 
     if len(frame) < 10:
         return [], [], task_type, "Dataset is too small to estimate model metrics."
-        return [], [], task_type, "Dataset is too small to estimate model metrics."
 
     X_train, X_test, y_train, y_test = train_test_split(
         X,
@@ -385,9 +362,6 @@ def build_model_metric_cards(
         metric_1, metric_2 = evaluate_pipeline(
             pipeline, X_train, X_test, y_train, y_test, task_type
         )
-        metric_1, metric_2 = evaluate_pipeline(
-            pipeline, X_train, X_test, y_train, y_test, task_type
-        )
         if task_type == "regression":
             label = f"{model_name} - R^2: {metric_1:.4f}, RMSE: {metric_2:.4f}"
             subtitle = f"R^2: {metric_1:.4f} | RMSE: {metric_2:.4f}"
@@ -397,12 +371,6 @@ def build_model_metric_cards(
         cards.append(
             html.Div(
                 [
-                    html.Div(
-                        model_name, style={"fontWeight": "700", "marginBottom": "4px"}
-                    ),
-                    html.Div(
-                        subtitle, style={"color": "#475569", "fontSize": "0.94rem"}
-                    ),
                     html.Div(
                         model_name, style={"fontWeight": "700", "marginBottom": "4px"}
                     ),
@@ -491,12 +459,11 @@ def set_model_metrics_state(
 
 def render_model_metrics_state(state: dict | None):
     if not state:
-        return [], None, [
-            html.Div(
-                "Train a model to load the model cards and score labels.",
-                style={"color": "#475569"},
-            )
-        ]
+        return (
+            [],
+            None,
+            [html.Div(MODEL_METRICS_EMPTY_MESSAGE, style={"color": "#475569"})],
+        )
     return state.get("options", []), state.get("value"), state.get("cards", [])
 
 
@@ -532,17 +499,7 @@ def parse_prediction_values(
 
 load_initial_dataset()
 
-MODEL_METRICS_STATE = {
-    "options": [],
-    "value": None,
-    "cards": [
-        html.Div(
-            "Train a model to load the model cards and score labels.",
-            style={"color": "#475569"},
-        )
-    ],
-    "message": "Train a model to load the model cards and score labels.",
-}
+MODEL_METRICS_STATE = empty_model_metrics_state()
 
 app = Dash(__name__)
 app.title = "Dataset ML Studio"
@@ -602,11 +559,7 @@ app.layout = html.Div(
                             children=html.Div(
                                 ["Drag and drop or ", html.A("select a CSV file")]
                             ),
-                            children=html.Div(
-                                ["Drag and drop or ", html.A("select a CSV file")]
-                            ),
                             style={
-                                "width": "60%",
                                 "width": "60%",
                                 "padding": "22px",
                                 "borderWidth": "2px",
@@ -637,12 +590,6 @@ app.layout = html.Div(
                         "borderRadius": "16px",
                         "background": "white",
                     },
-                    style={
-                        "padding": "18px",
-                        "border": "1px solid #dbe3ee",
-                        "borderRadius": "16px",
-                        "background": "white",
-                    },
                 ),
                 html.Div(
                     [
@@ -651,11 +598,6 @@ app.layout = html.Div(
                         dcc.Dropdown(
                             id="target-dropdown",
                             options=option_list(numeric_columns(CURRENT_DF)),
-                            value=(
-                                numeric_columns(CURRENT_DF)[0]
-                                if numeric_columns(CURRENT_DF)
-                                else None
-                            ),
                             value=(
                                 numeric_columns(CURRENT_DF)[0]
                                 if numeric_columns(CURRENT_DF)
@@ -670,19 +612,8 @@ app.layout = html.Div(
                                 "fontSize": "0.9rem",
                                 "color": "#5b6472",
                             },
-                            style={
-                                "marginTop": "8px",
-                                "fontSize": "0.9rem",
-                                "color": "#5b6472",
-                            },
                         ),
                     ],
-                    style={
-                        "padding": "18px",
-                        "border": "1px solid #dbe3ee",
-                        "borderRadius": "16px",
-                        "background": "white",
-                    },
                     style={
                         "padding": "18px",
                         "border": "1px solid #dbe3ee",
@@ -703,10 +634,6 @@ app.layout = html.Div(
                 html.Div(
                     [
                         html.H3("Barcharts", style={"marginTop": "0"}),
-                        html.Div(
-                            "Category variable",
-                            style={"marginBottom": "6px", "fontWeight": "600"},
-                        ),
                         html.Div(
                             "Category variable",
                             style={"marginBottom": "6px", "fontWeight": "600"},
@@ -766,12 +693,6 @@ app.layout = html.Div(
                         "borderRadius": "16px",
                         "background": "white",
                     },
-                    style={
-                        "padding": "18px",
-                        "border": "1px solid #dbe3ee",
-                        "borderRadius": "16px",
-                        "background": "white",
-                    },
                 ),
                 html.Div(
                     [
@@ -791,12 +712,6 @@ app.layout = html.Div(
                             ),
                         ),
                     ],
-                    style={
-                        "padding": "18px",
-                        "border": "1px solid #dbe3ee",
-                        "borderRadius": "16px",
-                        "background": "white",
-                    },
                     style={
                         "padding": "18px",
                         "border": "1px solid #dbe3ee",
@@ -832,14 +747,6 @@ app.layout = html.Div(
                 ),
                 html.Div(
                     [
-                        html.Div(
-                            "Model selection",
-                            style={
-                                "marginTop": "10px",
-                                "marginBottom": "6px",
-                                "fontWeight": "600",
-                            },
-                        ),
                         html.Div(
                             "Model selection",
                             style={
@@ -885,26 +792,11 @@ app.layout = html.Div(
                         "color": "#475569",
                         "fontSize": "0.95rem",
                     },
-                    style={
-                        "marginTop": "10px",
-                        "color": "#475569",
-                        "fontSize": "0.95rem",
-                    },
-                ),
-                html.Div(
-                    id="train-output", style={"marginTop": "10px", "fontWeight": "600"}
                 ),
                 html.Div(
                     id="train-output", style={"marginTop": "10px", "fontWeight": "600"}
                 ),
             ],
-            style={
-                "padding": "18px",
-                "border": "1px solid #dbe3ee",
-                "borderRadius": "16px",
-                "background": "white",
-                "marginBottom": "16px",
-            },
             style={
                 "padding": "18px",
                 "border": "1px solid #dbe3ee",
@@ -974,22 +866,11 @@ app.layout = html.Div(
                                 "fontWeight": "700",
                                 "marginLeft": "10px",
                             },
-                            style={
-                                "alignSelf": "center",
-                                "fontWeight": "700",
-                                "marginLeft": "10px",
-                            },
                         ),
                     ],
                     style={"display": "flex", "gap": "10px", "alignItems": "center"},
                 ),
             ],
-            style={
-                "padding": "18px",
-                "border": "1px solid #dbe3ee",
-                "borderRadius": "16px",
-                "background": "white",
-            },
             style={
                 "padding": "18px",
                 "border": "1px solid #dbe3ee",
@@ -1028,17 +909,7 @@ def handle_dataset_upload(contents, filename, current_store):
         return (
             dataframe_to_store(CURRENT_DF),
             f"Loaded {CURRENT_DATASET_NAME}. Rows: {len(CURRENT_DF):,}, columns: {len(CURRENT_DF.columns):,}.",
-            {
-                "options": [],
-                "value": None,
-                "cards": [
-                    html.Div(
-                        "Train a model to load the model cards and score labels.",
-                        style={"color": "#475569"},
-                    )
-                ],
-                "message": "Train a model to load the model cards and score labels.",
-            },
+            empty_model_metrics_state(),
         )
     except Exception as exc:
         return current_store, f"Upload failed: {exc}", MODEL_METRICS_STATE
@@ -1075,9 +946,6 @@ def refresh_view(dataset_data, target_value, category_value, selected_features):
         resolved_target = (
             target_value if target_value in numeric_cols else numeric_cols[0]
         )
-        resolved_target = (
-            target_value if target_value in numeric_cols else numeric_cols[0]
-        )
         CURRENT_TARGET = resolved_target
 
     graph_categories = graph_category_options(frame, resolved_target)
@@ -1094,9 +962,6 @@ def refresh_view(dataset_data, target_value, category_value, selected_features):
     if selected_features is None:
         resolved_features = feature_cols
     else:
-        resolved_features = [
-            feature for feature in selected_features if feature in feature_cols
-        ]
         resolved_features = [
             feature for feature in selected_features if feature in feature_cols
         ]
@@ -1200,16 +1065,8 @@ def train_model(n_clicks, target_value, selected_features):
             for feature in selected_features
             if feature in CURRENT_DF.columns and feature != target_value
         ]
-        cleaned_features = [
-            feature
-            for feature in selected_features
-            if feature in CURRENT_DF.columns and feature != target_value
-        ]
         logger.info("Train stage: cleaned_features=%s", cleaned_features)
         if not cleaned_features:
-            LAST_TRAIN_MESSAGE = (
-                "Selected features do not contain any usable predictors."
-            )
             LAST_TRAIN_MESSAGE = (
                 "Selected features do not contain any usable predictors."
             )
@@ -1219,12 +1076,6 @@ def train_model(n_clicks, target_value, selected_features):
         X = CURRENT_DF[cleaned_features].copy()
         y = CURRENT_DF[target_value].copy()
         task_type = infer_task_type(y)
-        logger.info(
-            "Train stage: task_type=%s rows=%s cols=%s",
-            task_type,
-            len(X),
-            len(X.columns),
-        )
         logger.info(
             "Train stage: task_type=%s rows=%s cols=%s",
             task_type,
@@ -1252,11 +1103,6 @@ def train_model(n_clicks, target_value, selected_features):
             len(X_train),
             len(X_test),
         )
-        logger.info(
-            "Train stage: split complete train_rows=%s test_rows=%s",
-            len(X_train),
-            len(X_test),
-        )
 
         preprocessor = build_preprocessor(X_train)
         models = get_models(task_type)
@@ -1268,9 +1114,6 @@ def train_model(n_clicks, target_value, selected_features):
         for model_name, model in models.items():
             logger.info("Train stage: evaluating %s", model_name)
             pipeline = Pipeline([("preprocessor", preprocessor), ("model", model)])
-            score, _ = evaluate_pipeline(
-                pipeline, X_train, X_test, y_train, y_test, task_type
-            )
             score, _ = evaluate_pipeline(
                 pipeline, X_train, X_test, y_train, y_test, task_type
             )
@@ -1339,17 +1182,11 @@ def predict_target(
         LAST_PREDICTION_MESSAGE = (
             "Retrain the model after changing the selected features."
         )
-        LAST_PREDICTION_MESSAGE = (
-            "Retrain the model after changing the selected features."
-        )
         return LAST_PREDICTION_MESSAGE
     if TRAINED_TARGET is None or target_value != TRAINED_TARGET:
         LAST_PREDICTION_MESSAGE = "Retrain the model after changing the target."
         return LAST_PREDICTION_MESSAGE
 
-    parsed_row, error = parse_prediction_values(
-        raw_prediction, TRAINED_FEATURES, CURRENT_DF
-    )
     parsed_row, error = parse_prediction_values(
         raw_prediction, TRAINED_FEATURES, CURRENT_DF
     )
